@@ -10,6 +10,27 @@ from a small RAG index, and remembers prior tickets across sessions — but at e
 step, a proposed action only executes if the harness's own code approves it. The
 model never decides that on its own.
 
+## Architecture
+
+![Dubba architecture: main.py, the LangGraph harness (classify, propose, permission check, execute_tool, evaluate, respond, escalate, reject_tool), the MCP server and its three tools, RAG, memory, and Langfuse tracing](assets/architecture.png)
+
+### LangGraph nodes (`harness/graph.py`, `--mode=graph`, the default/functional agent)
+
+| Node | What it does |
+|---|---|
+| `classify` | LLM call. Detects every ticket category the message touches (a message can span more than one), upfront. |
+| `propose` | LLM call, forced to pick exactly one of: `respond`, `ask_clarification`, `lookup_order`, `check_account_status`, `search_policy`. Only proposes — never executes anything itself. |
+| *(permission check)* | Not a node — a **conditional edge** (`route_after_propose`) between `propose` and `execute_tool`. Runs `harness/permissions.py` against the real session (does this order/customer ID belong to the logged-in customer?) before any tool call happens. |
+| `execute_tool` | Only reached if the permission check passed. Awaits the actual MCP tool call over stdio and records the result. |
+| `evaluate` | LLM-as-judge call. Given what's been gathered so far, decides whether there's enough to answer the customer, or whether another tool call is needed (capped at 3 tool calls total per turn, shared across all categories — not a per-category budget). |
+| `respond` | LLM call that formats the final, customer-facing answer from whatever real data was gathered. Also the exit point for `ask_clarification` (passed through as-is, no extra LLM call needed). |
+| `escalate` | Reached when `evaluate` still isn't satisfied and the tool-call cap is hit. Deterministic HITL message: a ticket is created, a human follows up from `dubba.support@dubba.com`, details arrive by email. |
+| `reject_tool` | Reached when the permission check denies a proposed tool call. Deterministic rejection message — no retry of a denied action within that category, ever. |
+
+Categories are processed one at a time: after `respond` / `escalate` / `reject_tool`,
+the graph loops back to `propose` for the next detected category, or ends the turn
+once all categories are handled.
+
 ## Prerequisites
 
 - Python 3.10+ (developed against 3.13/3.14)
