@@ -18,6 +18,16 @@ up "damaged item -> refund eligibility" via search_policy, refund_request (the s
 underlying issue, processed right after) sees that result too instead of redundantly
 re-discovering it against its own share of the shrinking cap. Neither resets between
 categories, only at the start of a new turn (classify_node).
+
+respond does NOT write customer-facing prose per category. It only decides, per
+category, whether that category is answerable (deferred to pending_response_categories)
+or needs a clarifying question (written immediately -- short, category-specific,
+low duplication risk). Once every category has been through the loop, finalize runs
+ONE LLM call covering every pending category together -- this is what stops two
+categories about the same underlying issue (e.g. delivery_issue + refund_request for
+one damaged candle) from each independently writing near-identical prose. All
+evaluate/tool-call work for every category finishes before any prose is written, not
+interleaved category-by-category.
 """
 
 from typing import TypedDict
@@ -65,6 +75,7 @@ class TicketState(TypedDict):
     tool_call_count: int
     turn_tool_results: list[dict]
     proposed_action: dict | None
+    pending_response_categories: list[str]
     final_actions: list[dict]
     sufficient: bool
 
@@ -189,6 +200,7 @@ def classify_node(state: TicketState) -> dict:
         "category_index": 0,
         "tool_call_count": 0,
         "turn_tool_results": [],
+        "pending_response_categories": [],
         "final_actions": [],
     }
 
@@ -311,37 +323,51 @@ def route_after_evaluate(state: TicketState) -> str:
 
 
 def respond_node(state: TicketState) -> dict:
+    """Does NOT write customer-facing prose -- that's finalize_node's job, once,
+    after every category has been through this loop. ask_clarification is the one
+    exception: it's short, category-specific, and propose already wrote its exact
+    text, so there's nothing to defer or dedupe."""
     category = state["categories"][state["category_index"]]
     action = state["proposed_action"]
-    # action is None when respond is reached via evaluate -> respond (proposed_action
-    # was already cleared by execute_tool_node after the last tool call) -- that path
-    # always needs the LLM formatting call below, same as a fresh "respond" proposal.
-    # Only a direct propose -> respond with ask_clarification skips it.
-    if action is not None and action["action_type"] == "ask_clarification":
-        message = action["message"]
-    else:
-        system = (
-            f"{prompts.RESPOND_SYSTEM_PROMPT}\n\n"
-            f"Category: {category}\n"
-            f"Gathered data, THIS TURN, across all categories: {state['turn_tool_results']}"
-        )
-        langfuse = get_client()
-        with langfuse.start_as_current_observation(
-            name="respond-format", as_type="generation", model=llm_client.PRIMARY_MODEL
-        ) as gen:
-            gen.update(input=state["user_message"])
-            response = llm_client.complete(
-                system=system,
-                messages=state["short_term_buffer"],
-            )
-            message = response.text
-            gen.update(
-                output=message,
-                model=response.model,
-                usage_details={"input": response.input_tokens, "output": response.output_tokens},
-            )
 
-    return _advance(state, category, message)
+    if action is not None and action["action_type"] == "ask_clarification":
+        return _advance(state, category, action["message"])
+
+    return {
+        "pending_response_categories": state["pending_response_categories"] + [category],
+        "category_index": state["category_index"] + 1,
+        "proposed_action": None,
+    }
+
+
+def finalize_node(state: TicketState) -> dict:
+    """The ONE LLM call that writes customer-facing prose, covering every category
+    in pending_response_categories together. This is what stops two categories about
+    the same underlying issue (e.g. delivery_issue + refund_request for one damaged
+    candle) from each independently producing near-identical text -- all gathering
+    (propose/execute_tool/evaluate) for every category is done before this runs."""
+    pending = state["pending_response_categories"]
+    system = (
+        f"{prompts.RESPOND_SYSTEM_PROMPT}\n\n"
+        f"Categories to answer together, in ONE reply: {pending}\n"
+        f"Gathered data, THIS TURN, across all categories: {state['turn_tool_results']}"
+    )
+
+    langfuse = get_client()
+    with langfuse.start_as_current_observation(
+        name="finalize-response", as_type="generation", model=llm_client.PRIMARY_MODEL
+    ) as gen:
+        gen.update(input=state["user_message"])
+        response = llm_client.complete(system=system, messages=state["short_term_buffer"])
+        message = response.text
+        gen.update(
+            output=message,
+            model=response.model,
+            usage_details={"input": response.input_tokens, "output": response.output_tokens},
+        )
+
+    label = " & ".join(c.replace("_", " ").title() for c in pending)
+    return {"final_actions": state["final_actions"] + [{"category": label, "message": message}]}
 
 
 def escalate_node(state: TicketState) -> dict:
@@ -371,6 +397,8 @@ def reject_tool_node(state: TicketState) -> dict:
 def route_after_category(state: TicketState) -> str:
     if state["category_index"] < len(state["categories"]):
         return "propose"
+    if state["pending_response_categories"]:
+        return "finalize"
     return END
 
 
@@ -381,6 +409,7 @@ def build_graph():
     workflow.add_node("execute_tool", execute_tool_node)
     workflow.add_node("evaluate", evaluate_node)
     workflow.add_node("respond", respond_node)
+    workflow.add_node("finalize", finalize_node)
     workflow.add_node("escalate", escalate_node)
     workflow.add_node("reject_tool", reject_tool_node)
 
@@ -397,9 +426,16 @@ def build_graph():
         route_after_evaluate,
         {"respond": "respond", "propose": "propose", "escalate": "escalate"},
     )
-    workflow.add_conditional_edges("respond", route_after_category, {"propose": "propose", END: END})
-    workflow.add_conditional_edges("escalate", route_after_category, {"propose": "propose", END: END})
-    workflow.add_conditional_edges("reject_tool", route_after_category, {"propose": "propose", END: END})
+    workflow.add_conditional_edges(
+        "respond", route_after_category, {"propose": "propose", "finalize": "finalize", END: END}
+    )
+    workflow.add_conditional_edges(
+        "escalate", route_after_category, {"propose": "propose", "finalize": "finalize", END: END}
+    )
+    workflow.add_conditional_edges(
+        "reject_tool", route_after_category, {"propose": "propose", "finalize": "finalize", END: END}
+    )
+    workflow.add_edge("finalize", END)
 
     return workflow.compile()
 
@@ -436,6 +472,7 @@ async def run_turn(session: dict, user_message: str) -> str:
                 "tool_call_count": 0,
                 "turn_tool_results": [],
                 "proposed_action": None,
+                "pending_response_categories": [],
                 "final_actions": [],
                 "sufficient": False,
             }

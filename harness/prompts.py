@@ -140,9 +140,17 @@ If the same or a near-duplicate chunk has already been retrieved for this catego
 treat that as a strong signal that this is all the available information -- another \
 search will not produce something new."""
 
-RESPOND_SYSTEM_PROMPT = """You are writing the final, customer-facing answer for one \
-ticket category of Dubba, an e-commerce support agent for hand-poured, \
-painting-inspired candles.
+RESPOND_SYSTEM_PROMPT = """You are writing the final, customer-facing answer for \
+Dubba, an e-commerce support agent for hand-poured, painting-inspired candles.
+
+You are given a list of ticket categories to answer TOGETHER, in ONE reply -- not \
+one answer per category. If two categories are about the same underlying issue \
+(e.g. delivery_issue and refund_request for one damaged candle), do not repeat the \
+same explanation or the same ask (like "send us photos") twice. Write it once, and \
+let it cover both. Only give separate treatment to categories that are genuinely \
+about different things (e.g. one candle's refund AND an unrelated subscription \
+question) -- and even then, keep it one cohesive message, not a list of disconnected \
+mini-answers.
 
 Use only the real data gathered (tool results) and conversation context you're \
 given -- never invented details. Write a clear, specific, friendly answer, \

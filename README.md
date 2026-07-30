@@ -23,13 +23,18 @@ model never decides that on its own.
 | *(permission check)* | Not a node — a **conditional edge** (`route_after_propose`) between `propose` and `execute_tool`. Runs `harness/permissions.py` against the real session (does this order/customer ID belong to the logged-in customer?) before any tool call happens. |
 | `execute_tool` | Only reached if the permission check passed. Awaits the actual MCP tool call over stdio and records the result. |
 | `evaluate` | LLM-as-judge call. Given what's been gathered so far, decides whether there's enough to answer the customer, or whether another tool call is needed (capped at 3 tool calls total per turn, shared across all categories — not a per-category budget). |
-| `respond` | LLM call that formats the final, customer-facing answer from whatever real data was gathered. Also the exit point for `ask_clarification` (passed through as-is, no extra LLM call needed). |
+| `respond` | Does **not** write customer-facing prose. Marks the category as answer-ready (deferred to `finalize`) — except `ask_clarification`, which is passed through as-is immediately (short, category-specific, no duplication risk). |
 | `escalate` | Reached when `evaluate` still isn't satisfied and the tool-call cap is hit. Deterministic HITL message: a ticket is created, a human follows up from `dubba.support@dubba.com`, details arrive by email. |
 | `reject_tool` | Reached when the permission check denies a proposed tool call. Deterministic rejection message — no retry of a denied action within that category, ever. |
+| `finalize` | The **one** LLM call that writes customer-facing prose, once every category has been through the loop — covering every answer-ready category together in a single, non-repetitive reply. |
 
 Categories are processed one at a time: after `respond` / `escalate` / `reject_tool`,
-the graph loops back to `propose` for the next detected category, or ends the turn
-once all categories are handled.
+the graph loops back to `propose` for the next detected category. Once every category
+is done, `finalize` runs (if any are answer-ready) and the turn ends. All
+evaluate/tool-call work for every category finishes before any prose is written —
+this is what stops two categories about the same underlying issue (e.g. a damaged
+candle raising both `delivery_issue` and `refund_request`) from each independently
+writing near-identical answers.
 
 ## Prerequisites
 
