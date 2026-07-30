@@ -1,0 +1,7 @@
+anthropic
+langfuse
+python-dotenv
+mcp[cli]
+langgraph
+chromadb
+sentence-transformers

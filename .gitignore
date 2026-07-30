@@ -1,0 +1,15 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.DS_Store
+chroma_db/
+memory/*.db
+log/
+
+# local Claude Code tooling, not part of the submission
+.agents/
+.claude/
+skills-lock.json
