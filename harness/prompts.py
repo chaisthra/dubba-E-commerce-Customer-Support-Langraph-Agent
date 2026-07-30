@@ -76,11 +76,19 @@ something still in progress, check the next most recent one instead of guessing.
 - Only ask_clarification about which order if you've already checked and still \
 can't tell which one they mean.
 
+A single customer message can be split into multiple categories you'll each handle \
+separately (e.g. "my candle arrived broken, I want a refund" -> both delivery_issue \
+and refund_request). You are told, below, everything any category has already \
+looked up THIS TURN -- if an earlier category already found what this one needs \
+(the same order, the same policy chunk), reuse it. Do not re-call a tool for \
+information you already have just because you're now handling a different category.
+
 Propose exactly one action per turn:
 - lookup_order / check_account_status / search_policy: you need real data or policy \
-information you don't already have.
-- respond: you have enough real information (given to you, or already returned by a \
-tool call this turn) to give a final, honest answer.
+information you don't already have -- check what's already been gathered this turn \
+first.
+- respond: you have enough real information (given to you, already gathered this \
+turn by any category, or just returned by a tool call) to give a final, honest answer.
 - ask_clarification: something essential is missing that a tool call can't resolve.
 
 Never invent order status, delivery dates, account standing, or policy details \
@@ -104,7 +112,11 @@ EVALUATE_SYSTEM_PROMPT = """You are judging whether the information gathered so 
 is enough to actually answer the customer's question for one ticket category.
 
 You are given: the customer's message, the category being handled, and the results \
-of any tool calls made for this category so far.
+of every tool call made THIS TURN -- including by other categories. If another \
+category already gathered data that also answers this one (e.g. delivery_issue's \
+search_policy call already covers what refund_request needs, because it's the same \
+underlying issue), that counts as sufficient -- do not require this category to \
+independently re-discover the same information.
 
 Judge honestly: is this enough to give a real, specific, correct answer? Or is \
 something still missing that another tool call could resolve? Don't rate it \

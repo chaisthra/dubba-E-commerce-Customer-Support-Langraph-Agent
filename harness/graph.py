@@ -11,9 +11,13 @@ Nodes: classify -> propose -> (edge: permission check) -> execute_tool -> evalua
 time, looping the whole chain per category (see route_after_category). A permission
 denial short-circuits straight to reject_tool -- no retry within that category, ever.
 
-tool_call_count is a single counter for the WHOLE turn (max 3 total tool calls across
-every category), not per-category -- runaway-loop protection, not a per-category
-budget.
+tool_call_count and turn_tool_results are both scoped to the WHOLE turn (max 3 total
+tool calls across every category; every tool result gathered stays visible to every
+category, not just the one that fetched it) -- so if delivery_issue already looked
+up "damaged item -> refund eligibility" via search_policy, refund_request (the same
+underlying issue, processed right after) sees that result too instead of redundantly
+re-discovering it against its own share of the shrinking cap. Neither resets between
+categories, only at the start of a new turn (classify_node).
 """
 
 from typing import TypedDict
@@ -59,7 +63,7 @@ class TicketState(TypedDict):
     categories: list[str]
     category_index: int
     tool_call_count: int
-    category_tool_results: list[dict]
+    turn_tool_results: list[dict]
     proposed_action: dict | None
     final_actions: list[dict]
     sufficient: bool
@@ -149,12 +153,14 @@ EVALUATE_TOOL = {
 
 def _advance(state: TicketState, category: str, message: str) -> dict:
     """Shared tail for respond/escalate/reject_tool: record this category's final
-    message and move on. Does NOT touch tool_call_count -- that cap is shared across
-    the whole turn, not reset per category."""
+    message and move on. Does NOT touch tool_call_count or turn_tool_results -- both
+    are shared across the WHOLE turn, not reset per category. If an earlier category
+    already looked something up (e.g. delivery_issue searching policy for a damaged
+    item), a later category (e.g. refund_request, same underlying issue) sees it
+    too, instead of redundantly re-discovering it against its own shrinking budget."""
     return {
         "final_actions": state["final_actions"] + [{"category": category, "message": message}],
         "category_index": state["category_index"] + 1,
-        "category_tool_results": [],
         "proposed_action": None,
     }
 
@@ -182,7 +188,7 @@ def classify_node(state: TicketState) -> dict:
         "categories": categories,
         "category_index": 0,
         "tool_call_count": 0,
-        "category_tool_results": [],
+        "turn_tool_results": [],
         "final_actions": [],
     }
 
@@ -197,7 +203,8 @@ def propose_node(state: TicketState) -> dict:
         f"This customer's order IDs, oldest first: {account['order_ids']}\n"
         f"Account standing: {account['standing']}\n"
         f"{format_prior_tickets(state['prior_tickets'])}\n"
-        f"Tool results gathered so far for this category: {state['category_tool_results']}"
+        f"Tool results gathered so far THIS TURN, across all categories (reuse "
+        f"anything relevant here instead of re-fetching it): {state['turn_tool_results']}"
     )
 
     langfuse = get_client()
@@ -247,6 +254,7 @@ def route_after_propose(state: TicketState) -> str:
 
 async def execute_tool_node(state: TicketState) -> dict:
     action = state["proposed_action"]
+    category = state["categories"][state["category_index"]]
     tool_name = action["action_type"]
     arg_field = schema.TOOL_ARG_FIELDS[tool_name]
     arguments = {arg_field: action[arg_field]}
@@ -258,8 +266,8 @@ async def execute_tool_node(state: TicketState) -> dict:
         span.update(output=result)
 
     return {
-        "category_tool_results": state["category_tool_results"]
-        + [{"tool": tool_name, "arguments": arguments, "result": result}],
+        "turn_tool_results": state["turn_tool_results"]
+        + [{"tool": tool_name, "arguments": arguments, "result": result, "gathered_for_category": category}],
         "tool_call_count": state["tool_call_count"] + 1,
         "proposed_action": None,
     }
@@ -270,7 +278,7 @@ def evaluate_node(state: TicketState) -> dict:
     system = (
         f"{prompts.EVALUATE_SYSTEM_PROMPT}\n\n"
         f"Category: {category}\n"
-        f"Gathered data so far: {state['category_tool_results']}"
+        f"Gathered data so far, THIS TURN, across all categories: {state['turn_tool_results']}"
     )
 
     langfuse = get_client()
@@ -315,7 +323,7 @@ def respond_node(state: TicketState) -> dict:
         system = (
             f"{prompts.RESPOND_SYSTEM_PROMPT}\n\n"
             f"Category: {category}\n"
-            f"Gathered data: {state['category_tool_results']}"
+            f"Gathered data, THIS TURN, across all categories: {state['turn_tool_results']}"
         )
         langfuse = get_client()
         with langfuse.start_as_current_observation(
@@ -426,7 +434,7 @@ async def run_turn(session: dict, user_message: str) -> str:
                 "categories": [],
                 "category_index": 0,
                 "tool_call_count": 0,
-                "category_tool_results": [],
+                "turn_tool_results": [],
                 "proposed_action": None,
                 "final_actions": [],
                 "sufficient": False,
