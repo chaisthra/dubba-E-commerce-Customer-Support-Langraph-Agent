@@ -99,8 +99,8 @@ rag/
   policy_docs/            6 policy docs (refunds, returns, delays, pricing, suspension, subscriptions)
 memory/
   store.py              long-term ticket history (SQLite this phase -- see below)
-requirements.txt
-.env.example
+requirements.txt     Python dependencies
+.env.example          template for .env -- exact variable names the code expects
 ```
 
 ## Why I built the harness this way
