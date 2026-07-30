@@ -87,8 +87,12 @@ Log in with any mock account from `mcp_server/mock_data.py`, e.g.:
 Email: asha.rao@example.com
 Access code: 4821
 ```
-Type `exit`, `quit`, or `bye` to end a session (this is also when long-term memory
-gets written).
+**Ending a session** — type `exit`, `quit`, or `bye`. You'll be asked "was your issue
+resolved today?" — the answer is recorded as `closure_reason` (`resolved` /
+`abandoned`) when the session is written to long-term memory
+(`memory/long_term_memory.db`). Closing the terminal or hitting Ctrl+C also works —
+that's caught explicitly too, saved as `abandoned` rather than silently dropped, and
+the MCP server subprocess is shut down cleanly either way.
 
 **To see the required rejection demo live**: ask about an order ID that belongs to a
 *different* mock customer (e.g. log in as `asha.rao@example.com` but ask about

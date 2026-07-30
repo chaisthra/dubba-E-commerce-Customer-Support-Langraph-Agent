@@ -34,6 +34,14 @@ WELCOME = """
 """
 
 
+def _ask_resolved() -> str:
+    """closure_reason is resolved|abandoned|timeout (see log/SESSION_DESIGN.md) --
+    never assumed. An unclear or empty answer defaults to abandoned, the more
+    honest/conservative reading."""
+    answer = input("\nBefore you go -- was your issue resolved today? (yes/no): ").strip().lower()
+    return "resolved" if answer.startswith("y") else "abandoned"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Dubba order-support agent")
     parser.add_argument(
@@ -51,7 +59,7 @@ async def run_loop_mode(session: dict) -> None:
         if not user_message:
             continue
         if user_message.lower() in EXIT_COMMANDS:
-            session["closure_reason"] = "resolved"
+            session["closure_reason"] = _ask_resolved()
             print("Dubba: Thanks for reaching out -- take care!")
             return
         reply = loop.handle_turn(session, user_message)
@@ -71,7 +79,7 @@ async def run_graph_mode(session: dict) -> None:
             if not user_message:
                 continue
             if user_message.lower() in EXIT_COMMANDS:
-                session["closure_reason"] = "resolved"
+                session["closure_reason"] = _ask_resolved()
                 print("Dubba: Thanks for reaching out -- take care!")
                 return
             reply = await graph.run_turn(session, user_message)
@@ -92,13 +100,21 @@ async def main() -> None:
     print(f"\nWelcome back, {account['email']}. How can I help with your order today?")
     session = loop.new_session(account["customer_id"], account)
 
-    if args.mode == "loop":
-        await run_loop_mode(session)
-    else:
-        await run_graph_mode(session)
+    try:
+        if args.mode == "loop":
+            await run_loop_mode(session)
+        else:
+            await run_graph_mode(session)
+    except (KeyboardInterrupt, EOFError):
+        # Ctrl+C / Ctrl+D -- a real, common way users leave a CLI. Never let this
+        # silently drop the session: mark it abandoned (not assumed resolved) and
+        # still fall through to the save below.
+        session["closure_reason"] = "abandoned"
+        print("\n\nDubba: Session ended -- your ticket has been saved as unresolved. Take care!")
 
     if session["short_term_buffer"]:
         save_ticket_summary(session)
+        print(f"(saved to memory/long_term_memory.db, closure_reason={session['closure_reason']!r})")
 
 
 if __name__ == "__main__":
