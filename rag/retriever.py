@@ -28,8 +28,15 @@ from chromadb.utils import embedding_functions
 DOCS_DIR = Path(__file__).resolve().parent / "policy_docs"
 # 3 sometimes missed the right chunk for candle-specific condition questions (e.g.
 # "already lit" competing against the subscription doc's "candle" mention) --
-# verified empirically that 4 reliably surfaces it across phrasings. See log/DECISIONS.md.
-TOP_K = 4
+# verified empirically that 4 reliably surfaces it across phrasings; bumped to 5 to
+# give MIN_SIMILARITY (below) more headroom. See log/DECISIONS.md.
+TOP_K = 5
+# Placeholder value, explicitly provisional (log/DECISIONS.md) -- known tradeoff:
+# the "already lit" return-eligibility chunk scores ~0.41 for its correct answer, so
+# it will now be filtered out below this threshold even though it's genuinely
+# relevant. Chosen anyway to start enforcing a real code-level cutoff rather than
+# relying only on the prompt; will be tuned once real query volume exists.
+MIN_SIMILARITY = 0.6
 
 _client = chromadb.Client()
 _embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
@@ -88,14 +95,14 @@ def _build_collection():
 _collection = _build_collection()
 
 
-def retrieve(query: str, top_k: int = TOP_K) -> list[dict]:
+def retrieve(query: str, top_k: int = TOP_K, min_similarity: float = MIN_SIMILARITY) -> list[dict]:
     results = _collection.query(query_texts=[query], n_results=top_k)
 
-    chunks = []
+    all_chunks = []
     for doc, meta, dist in zip(
         results["documents"][0], results["metadatas"][0], results["distances"][0]
     ):
-        chunks.append({
+        all_chunks.append({
             "doc_name": meta["doc_name"],
             "chunk_index": meta["chunk_index"],
             "heading": meta["heading"],
@@ -103,10 +110,15 @@ def retrieve(query: str, top_k: int = TOP_K) -> list[dict]:
             "similarity": round(1 - dist, 4),
         })
 
+    chunks = [c for c in all_chunks if c["similarity"] >= min_similarity]
+    dropped = [c for c in all_chunks if c["similarity"] < min_similarity]
+
     # stderr, not stdout -- stdout is the MCP stdio protocol channel; printing there
     # corrupts the JSON-RPC message stream.
     print(f"[RAG] query={query!r} -> chunks used: "
-          f"{[(c['doc_name'], c['chunk_index'], c['heading'], c['similarity']) for c in chunks]}",
+          f"{[(c['doc_name'], c['chunk_index'], c['heading'], c['similarity']) for c in chunks]}"
+          f" | dropped below min_similarity={min_similarity}: "
+          f"{[(c['doc_name'], c['chunk_index'], c['similarity']) for c in dropped]}",
           file=sys.stderr)
 
     return chunks
