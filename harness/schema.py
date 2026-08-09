@@ -17,9 +17,6 @@ TOOL_ARG_FIELDS = {
     "search_policy": "query",
 }
 TOOL_ACTION_TYPES = set(TOOL_ARG_FIELDS)
-# search_policy has no customer/order ID to own -- it searches public policy docs,
-# not customer data -- so it skips the ownership check in permissions.py entirely.
-UNSCOPED_TOOL_ACTION_TYPES = {"search_policy"}
 
 VALID_ACTION_TYPES = {"respond", "ask_clarification"} | TOOL_ACTION_TYPES
 VALID_CATEGORIES = {

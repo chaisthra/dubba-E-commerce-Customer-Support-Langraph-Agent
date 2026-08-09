@@ -329,8 +329,16 @@ def respond_node(state: TicketState) -> dict:
     text, so there's nothing to defer or dedupe."""
     category = state["categories"][state["category_index"]]
     action = state["proposed_action"]
+    is_clarification = action is not None and action["action_type"] == "ask_clarification"
 
-    if action is not None and action["action_type"] == "ask_clarification":
+    langfuse = get_client()
+    with langfuse.start_as_current_observation(name="respond-decision", as_type="span") as span:
+        span.update(
+            input=action,
+            output={"outcome": "ask_clarification" if is_clarification else "deferred_to_finalize"},
+        )
+
+    if is_clarification:
         return _advance(state, category, action["message"])
 
     return {
