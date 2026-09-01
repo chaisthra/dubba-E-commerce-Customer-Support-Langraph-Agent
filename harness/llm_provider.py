@@ -291,6 +291,22 @@ def _normalize_anthropic(response, model: str) -> LLMResponse:
     )
 
 
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def _strip_reasoning(text: str | None) -> str | None:
+    """Groq's reasoning-capable models (the openai/gpt-oss family, Qwen) emit
+    their chain-of-thought inline as literal <think>...</think> text in the
+    completion by default -- `reasoning_format` (the API's own suppression
+    knob) isn't even supported for gpt-oss ("reasons always-on and cannot be
+    disabled" per Groq's own docs), so this can't be fixed by a request
+    parameter for our model list; has to be stripped from the text itself.
+    Confirmed necessary by a real leaked reply -- see log/DECISIONS.md."""
+    if text is None:
+        return None
+    return _THINK_TAG_RE.sub("", text).strip()
+
+
 def _normalize_groq(response, model: str) -> LLMResponse:
     message = response.choices[0].message
     tool_calls = [
@@ -299,7 +315,7 @@ def _normalize_groq(response, model: str) -> LLMResponse:
     ]
 
     return LLMResponse(
-        text=message.content,
+        text=_strip_reasoning(message.content),
         tool_calls=tool_calls,
         stop_reason=response.choices[0].finish_reason or "",
         input_tokens=response.usage.prompt_tokens if response.usage else 0,
