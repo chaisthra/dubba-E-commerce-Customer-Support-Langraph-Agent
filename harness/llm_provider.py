@@ -89,8 +89,17 @@ class AnthropicProvider(Provider):
         last_error: Exception | None = None
         for model in self.MODELS:
             try:
+                # No temperature= here on purpose -- removed from anthropic-sdk-python's
+                # Messages.create() signature entirely as of a release that shipped
+                # mid-session (confirmed live via inspect.signature() in the deployed
+                # container: SDK went 1.2.0 -> 1.3.0 between two of our own tests a few
+                # minutes apart, both on requirements.txt's unpinned `anthropic`).
+                # output_config (the new param that appeared) is unrelated -- reasoning
+                # effort + structured-output schema, not sampling. Anthropic's own
+                # stated fix is "omit entirely, control determinism via prompt" -- no
+                # replacement kwarg exists. See log/DECISIONS.md.
                 response = self._client.messages.create(
-                    model=model, max_tokens=1024, system=system, messages=messages, temperature=0, **kwargs
+                    model=model, max_tokens=1024, system=system, messages=messages, **kwargs
                 )
                 return _normalize_anthropic(response, model)
             except (anthropic.APIStatusError, anthropic.APIConnectionError, anthropic.APITimeoutError) as exc:
