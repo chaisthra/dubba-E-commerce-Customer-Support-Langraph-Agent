@@ -109,7 +109,7 @@ jobs:
       - name: Run regression eval gate
         env:
           DATABASE_URL: postgresql://dubba:dubba@localhost:5433/dubba
-          AGENT_REGRESSED: ${{ inputs.agent_regressed || 'false' }}
+          AGENT_REGRESSED: "true"
         run: python evals/combined_score.py --gate
 
   # ---------------------------------------------------------------
@@ -121,6 +121,16 @@ jobs:
   # ---------------------------------------------------------------
   build-and-push:
     needs: eval-gate
+    # push only -- PR #1 (w2a-deploy -> w1a-harness) being open means every push
+    # to w2a-deploy ALSO fires a pull_request:synchronize event (a synthetic
+    # merge-commit build, not the real commit), which used to run this job too
+    # -- two builds racing to deploy to the same ECS service from the same
+    # push. Confirmed live: one run's deploy step reported a false circuit-
+    # breaker rollback because the OTHER run's deployment superseded it
+    # mid-stabilization, even though the app itself never failed a health
+    # check. eval-gate still runs on both (a real, useful PR status check);
+    # only the actual deploy path is push-only now. See log/DECISIONS.md.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.build.outputs.image }}
@@ -152,6 +162,10 @@ jobs:
 
   deploy:
     needs: build-and-push
+    # push only -- see build-and-push's own comment above. Explicit here too,
+    # not just relying on build-and-push being skipped to cascade -- makes the
+    # intent unambiguous on read, not just an implicit consequence.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
