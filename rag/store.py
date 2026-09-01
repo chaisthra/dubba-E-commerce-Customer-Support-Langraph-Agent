@@ -45,11 +45,26 @@ def _configure(conn: psycopg.Connection) -> None:
     register_vector(conn)
 
 
-_pool = ConnectionPool(os.environ["DATABASE_URL"], configure=_configure, open=True)
+_dsn = os.environ["DATABASE_URL"]
+# open=False -- the pool must NOT start opening (and configuring, i.e. calling
+# register_vector on) connections until ensure_schema() has guaranteed the
+# `vector` extension actually exists. On a fresh database (this repo's CI
+# Postgres service container starts empty every run) open=True's eager
+# background connection-opening races CREATE EXTENSION: every background
+# connect calls _configure -> register_vector before the extension exists,
+# fails, and the pool can never fill -- ensure_schema()'s own getconn() then
+# times out waiting for a connection that can structurally never succeed.
+# Confirmed live in CI: "vector type not found in the database" x20, then
+# `psycopg_pool.PoolTimeout: couldn't get a connection after 30.00 sec`.
+_pool = ConnectionPool(_dsn, configure=_configure, open=False)
 
 
 def ensure_schema() -> None:
-    with _pool.connection() as conn:
+    # Bare connection, no register_vector -- DDL doesn't need the type adapter,
+    # and the extension may not exist yet on a fresh database. Runs and closes
+    # BEFORE the pool opens, so every pool connection's _configure callback is
+    # guaranteed the extension already exists by the time it runs.
+    with psycopg.connect(_dsn) as conn:
         conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
         conn.execute(
             f"""
@@ -68,6 +83,8 @@ def ensure_schema() -> None:
             "CREATE INDEX IF NOT EXISTS idx_policy_chunks_embedding ON policy_chunks "
             "USING hnsw (embedding vector_cosine_ops)"
         )
+
+    _pool.open(wait=True)
 
 
 def is_empty() -> bool:
