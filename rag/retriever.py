@@ -80,25 +80,25 @@ def _chunk_doc(path: Path) -> list[dict]:
     return chunks
 
 
-def _ensure_ingested(conn) -> None:
+def _ensure_ingested() -> None:
     """Populates policy_chunks on first-ever run (persists in Postgres from then on --
     unlike the old in-memory Chroma collection, this survives across MCP subprocess
     restarts, only re-embedding if the table is genuinely empty)."""
-    if not store.is_empty(conn):
+    if not store.is_empty():
         return
 
     all_chunks = [chunk for path in sorted(DOCS_DIR.glob("*.md")) for chunk in _chunk_doc(path)]
     embeddings = _embedder.encode([c["content"] for c in all_chunks], normalize_embeddings=True)
-    store.ingest(conn, all_chunks, embeddings)
+    store.ingest(all_chunks, embeddings)
 
 
-_conn = store.connect()
-_ensure_ingested(_conn)
+store.ensure_schema()
+_ensure_ingested()
 
 
 def retrieve(query: str, top_k: int = TOP_K, min_similarity: float = MIN_SIMILARITY) -> list[dict]:
     query_embedding = _embedder.encode(query, normalize_embeddings=True)
-    all_chunks = store.search(_conn, query_embedding, top_k)
+    all_chunks = store.search(query_embedding, top_k)
 
     chunks = [c for c in all_chunks if c["similarity"] >= min_similarity]
     dropped = [c for c in all_chunks if c["similarity"] < min_similarity]
