@@ -10,3 +10,5 @@ groq
 pgvector
 fastapi
 uvicorn[standard]
+pydantic
+boto3

@@ -23,6 +23,7 @@ model never decides that on its own.
 | *(permission check)* | Not a node — a **conditional edge** (`route_after_propose`) between `propose` and `execute_tool`. Runs `harness/permissions.py` against the real session (does this order/customer ID belong to the logged-in customer?) before any tool call happens. |
 | `execute_tool` | Only reached if the permission check passed. Awaits the actual MCP tool call over stdio and records the result. |
 | `evaluate` | LLM-as-judge call. Given what's been gathered so far, decides whether there's enough to answer the customer, or whether another tool call is needed (capped at 3 tool calls total per turn, shared across all categories — not a per-category budget). |
+| `refund` | **No LLM call.** Assignment 3's HITL entry point — reached from `evaluate` the moment a `refund_request` category has an order looked up, ahead of the `sufficient`/cap/propose branches. Computes eligibility deterministically from real order/account data (`mcp_server/mock_data.py`), creates a `PendingAction` for human review when warranted, and writes its own customer-facing message directly (same bypass-`finalize` mechanism as `ask_clarification`). See `refunds/`. |
 | `respond` | Does **not** write customer-facing prose. Marks the category as answer-ready (deferred to `finalize`) — except `ask_clarification`, which is passed through as-is immediately (short, category-specific, no duplication risk). |
 | `escalate` | Reached when `evaluate` still isn't satisfied and the tool-call cap is hit. Deterministic HITL message: a ticket is created, a human follows up from `dubba.support@dubba.com`, details arrive by email. |
 | `reject_tool` | Reached when the permission check denies a proposed tool call. Deterministic rejection message — no retry of a denied action within that category, ever. |
@@ -512,3 +513,124 @@ optional and out of scope for this submission; `harness/llm_provider.py`'s
 existing `Provider`/`ProviderChain` abstraction (built for the Anthropic/Groq
 fallback chain) is the natural seam a future `BedrockProvider` stub would slot
 into, whenever that gets picked up.
+
+## Assignment 3 — Refund Node + Human-in-the-Loop Approval
+
+### 1. Node, not a second agent
+
+`refund` is a node inside the same LangGraph, not an A2A handoff to a separate
+service. Walked the four questions honestly (different tools/data/authority?
+one-sentence job? real current bottleneck? can we afford the failure mode?) — the
+failure mode is what settles it: a network hop that can silently retry is real
+risk taken on for architectural tidiness, on a flow whose entire purpose is not
+refunding twice. See `refund_node`'s own docstring in `harness/graph.py`.
+
+### 2. Graph changes
+
+One new node (`refund`), one new branch on the existing `route_after_evaluate`
+edge, checked first — ahead of `sufficient`/cap/propose, since refund eligibility
+is a deterministic computation on data already in state, not something worth
+asking `evaluate`'s LLM to judge:
+
+```
+classify -> propose <-> evaluate -> [route_after_evaluate] -> refund   (no LLM call)
+                                                             -> propose (under cap)
+                                                             -> respond
+                                                             -> escalate
+```
+
+`refund_node` has **no LLM call**. The model already did its reasoning at
+`propose_node` (deciding to call `lookup_order`); this node just computes
+eligibility from real data (`mcp_server/mock_data.py`'s `refund_window_eligible`/
+`account_standing_ok`/`refund_window_days_remaining`, already derived from real
+dates before this assignment even started) and writes its own customer-facing
+text directly via the same `_advance()` helper `ask_clarification`/`escalate`/
+`reject_tool` already use to bypass `finalize_node`'s LLM rephrasing entirely —
+money-related text a human should be able to trust matches the actual decision,
+not an LLM's paraphrase of it.
+
+`refund_type` (standard / damaged-in-transit / non-delivery) has one honest
+limitation: order data alone can only detect non-delivery (missing shipped/
+delivery dates). Distinguishing a damaged item from a plain return needs some
+signal beyond dates, and the only place "damage" is expressed today is the
+customer's own message — so `refund_node` does a plain keyword check on
+`state["user_message"]` (`_DAMAGE_KEYWORDS` in `harness/graph.py`). A missed
+phrasing just means a real damage claim falls through to the `standard` path
+(still creates a `PendingAction` for human review) rather than getting the more
+permissive window-check exemption `damaged_in_transit` gets.
+
+### 3. The `refunds/` package
+
+- `refunds/schemas.py` — `PendingAction`, `RefundDecision`, and this app's own
+  `RefundEligibilityResult` (refund_node's internal eligibility computation,
+  deliberately named apart from `RefundDecision` — see that file's own
+  docstring for why the two aren't the same thing despite the original design
+  doc using one name for both).
+- `refunds/approval_gate.py` — the `ApprovalStore` interface (`save`/`get`/
+  `get_active_for_resource`/`all_pending`/`transition`) plus two backends:
+  `JsonFileStore` (local dev, `fcntl`-locked read-modify-write) and
+  `DynamoDBStore` (AWS, `ConditionExpression`-based). No separate Postgres
+  `refund_tickets` table — this store *is* the durable record, including
+  duplicate detection (`get_active_for_resource`, correlated on `order_id`,
+  never ticket/session id). Selected by `HITL_STORE_BACKEND` (unset/`json`
+  locally, `dynamodb` in the deployed task).
+- `refunds/execute.py` — `execute_refund()`, the re-validation step between
+  "approved" and "executed." Approving is not executing; state can change in
+  between, so this re-fetches live order/account data and refuses on drift
+  (`account_standing`, `order_status`) rather than trusting a stale snapshot.
+
+`PendingAction`/`RefundDecision`'s field shapes are a **fixed external
+contract** (an instructor-provided `hitl_cli.py`/`approval_gate.py` interface
+this app interoperates with), not something redesigned here.
+
+### 4. Reviewer CLI
+
+```bash
+python hitl_cli.py list
+python hitl_cli.py approve <action_id> --reviewer alice
+python hitl_cli.py execute <action_id> --reviewer alice   # re-validates against live state
+python hitl_cli.py reject  <action_id> --reviewer alice
+```
+
+`approve` and `execute` are deliberately separate steps, not one combined
+action — the graded bug scenario below (approve, then the account gets
+suspended, then execute) only makes sense with a real window between them for
+state to change.
+
+### 5. Graded bug scenarios
+
+`python evals/refund_bug_scenarios.py` — four real repros, not descriptions of
+intended behavior, run against the actual `JsonFileStore`/`execute_refund`:
+
+1. Two refund requests on the same order — the second finds the first via
+   `get_active_for_resource`, never creates a duplicate.
+2. Two reviewers approving the same `PendingAction` simultaneously — 10 real
+   concurrent subprocesses race `transition()`; exactly one wins, verified
+   directly, not assumed from the locking design.
+3. Approve, then suspend the account, then execute — the drift check refuses,
+   status stays `APPROVED`, never reaches `EXECUTED`.
+4. Replay an approval call (a network retry) — the second call is refused, not
+   double-applied; `resolved_by` stays the first reviewer's.
+
+### 6. AWS backend
+
+`infra/aws-network-rds-ecr.yaml` provisions `HitlApprovalsTable` (DynamoDB,
+`PAY_PER_REQUEST`, partition key `action_id`). `infra/aws-ecs-alb.yaml` adds a
+`TaskRole` distinct from the existing `ExecutionRole` — the execution role is
+assumed by the ECS agent (image pull, secrets fetch) before the container
+starts; DynamoDB calls happen from the *running application code itself*
+(`refunds/approval_gate.py`'s `boto3` calls), a different trust boundary, so a
+different role, scoped only to `dynamodb:GetItem`/`PutItem`/`UpdateItem`/`Scan`
+on `HitlApprovalsTable`'s ARN. Template-level only as of this writing — not yet
+applied to the live stack (same treatment as other infra changes made this
+week without a live redeploy each time: the template is the source of truth
+for the next deploy, not something that triggers one on its own).
+
+### What stays out
+
+Actual email sending — `PendingAction` has nothing that emails a reviewer or a
+customer; `hitl_cli.py list`/the eventual review is manual. AgentCore migration
+— the design this was built against notes where the graph/node/Pydantic models
+would move unchanged, and flags that the admin surface's `hitl_cli.py` may need
+to stay a small separate process if AgentCore's invocation surface doesn't
+expose custom entry points; not attempted this week.

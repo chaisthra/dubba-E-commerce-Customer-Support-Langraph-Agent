@@ -124,6 +124,24 @@ Resources:
       # before every teardown, which is exactly the kind of step section 2.6.5
       # warns gets forgotten.
 
+  # Assignment 3 -- the HITL approval queue's production backend (see
+  # refunds/approval_gate.py's DynamoDBStore; JsonFileStore is the local-dev
+  # equivalent, selected by HITL_STORE_BACKEND). PAY_PER_REQUEST, not
+  # provisioned capacity -- this app's refund volume never justifies planning
+  # RCU/WCU ahead of time. No GSI on order_id/status (get_active_for_resource/
+  # all_pending scan instead) -- fine at this app's scale, see log/loophole.md.
+  HitlApprovalsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ordercare-hitl-approvals
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: action_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: action_id
+          KeyType: HASH
+
 Outputs:
   PrivateSubnetIds:
     Description: For infra/aws-ecs-alb.yaml reference if ever needed (RDS subnet group only, ECS does not use these).
@@ -139,3 +157,6 @@ Outputs:
   ECRRepositoryUri:
     Description: Push images here (docker build/tag/push) -- needed before infra/aws-ecs-alb.yaml can deploy.
     Value: !GetAtt ECRRepository.RepositoryUri
+  HitlApprovalsTableArn:
+    Description: infra/aws-ecs-alb.yaml's TaskRole gets DynamoDB access scoped to this ARN.
+    Value: !GetAtt HitlApprovalsTable.Arn
