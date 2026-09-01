@@ -33,29 +33,58 @@ Parameters:
       Optional EC2 key pair name for SSH access. Leave blank (default) to rely on
       SSM Session Manager instead -- no key pair to manage or leak, and no inbound
       port 22 needed at all.
+  AllowedViewerCidr:
+    Type: String
+    Description: >
+      Your own IP, as a /32 (e.g. 183.83.193.44/32) -- find it with
+      `curl -s https://checkip.amazonaws.com`. This is the only IP allowed to
+      browse the Langfuse web UI directly; CI never needs to reach this
+      instance at all (see log/DECISIONS.md -- eval-gate's Langfuse SDK calls
+      degrade to a no-op with no credentials set, so it was deliberately never
+      given this instance's keys).
+  ECSTaskSecurityGroupId:
+    Type: String
+    Default: ""
+    Description: >
+      Optional -- the dubba-ecs-alb stack's DubbaTaskSecurityGroup output, once
+      that stack exists (`aws cloudformation describe-stack-resources
+      --stack-name dubba-ecs-alb --logical-resource-id DubbaTaskSecurityGroup
+      --query "StackResources[0].PhysicalResourceId" --output text`). Lets the
+      REAL deployed agent send it real production traces, without opening
+      Langfuse to the internet at all for that purpose. Leave blank if the ECS
+      stack doesn't exist yet.
 
 Conditions:
   HasSSHKey: !Not [!Equals [!Ref SSHKeyName, ""]]
+  HasECSTaskSG: !Not [!Equals [!Ref ECSTaskSecurityGroupId, ""]]
 
 Resources:
   LangfuseSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Langfuse EC2 host -- port 3000 open to the internet (CI source IP is dynamic, cannot be scoped tighter without a proxy or VPN), SSH only if a key pair is provided.
+      GroupDescription: Langfuse EC2 host -- port 3000 restricted to one specific viewer IP, plus the deployed ECS agent security group if provided. Never open to the internet at large.
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 3000
           ToPort: 3000
-          CidrIp: 0.0.0.0/0
-          Description: Langfuse web UI + API (langfuse-web) -- what CI and browsers hit.
+          CidrIp: !Ref AllowedViewerCidr
+          Description: Langfuse web UI + API -- restricted to one known viewer IP, not the open internet.
+        - !If
+          - HasECSTaskSG
+          - IpProtocol: tcp
+            FromPort: 3000
+            ToPort: 3000
+            SourceSecurityGroupId: !Ref ECSTaskSecurityGroupId
+            Description: The deployed ECS agent sending real production traces -- present only when ECSTaskSecurityGroupId was provided.
+          - !Ref AWS::NoValue
         - !If
           - HasSSHKey
           - IpProtocol: tcp
             FromPort: 22
             ToPort: 22
-            CidrIp: 0.0.0.0/0
-            Description: SSH (only present because SSHKeyName was set -- otherwise use SSM Session Manager).
+            CidrIp: !Ref AllowedViewerCidr
+            Description: SSH (only present because SSHKeyName was set -- otherwise use SSM Session Manager). Same restricted IP as the web UI, never 0.0.0.0/0.
           - !Ref AWS::NoValue
 
   LangfuseInstanceRole:
