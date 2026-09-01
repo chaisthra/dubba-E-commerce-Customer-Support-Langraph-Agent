@@ -1,0 +1,144 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="AWS Deployment Architecture" id="dubba-aws-arch">
+    <mxGraphModel dx="1400" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1500" pageHeight="1150" math="0" shadow="0" background="#FFFFFF">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- SSM sits ABOVE the pipeline row, not between OIDC and ECR, so the
+             OIDC-to-ECR line never has to cross through it -->
+        <mxCell id="ssm" value="SSM Parameter Store&#10;/dubba/anthropic-api-key&#10;/dubba/groq-api-key&#10;/dubba/database-url" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="850" y="30" width="260" height="110" as="geometry" />
+        </mxCell>
+
+        <!-- ================= PIPELINE ROW (one straight line) ================= -->
+
+        <mxCell id="github" value="GitHub&#10;push to w2a-deploy" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="190" width="170" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gha" value="GitHub Actions: ci-cd.yml&#10;eval-gate -&gt; build-and-push -&gt; deploy" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="270" y="190" width="230" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="oidc" value="IAM Role (OIDC)&#10;dubba-github-actions-deploy&#10;no static AWS keys" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="560" y="190" width="230" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ecr" value="ECR: dubba&#10;SHA-tagged, IMMUTABLE" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1140" y="190" width="220" height="70" as="geometry" />
+        </mxCell>
+
+        <!-- ================= VPC ================= -->
+
+        <mxCell id="vpc" value="VPC (vpc-01bf8f177b6df0109)" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=10;fillColor=none;strokeColor=#000000;dashed=1;fontSize=14;fontStyle=1;spacingTop=10;" vertex="1" parent="1">
+          <mxGeometry x="270" y="400" width="1090" height="480" as="geometry" />
+        </mxCell>
+
+        <mxCell id="pubsubnet" value="Public Subnets (3 AZs) -- ALB + ECS task both here, no NAT Gateway" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=10;fillColor=#f5f5f5;strokeColor=#999999;dashed=1;fontSize=11;fontStyle=2;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="300" y="440" width="380" height="410" as="geometry" />
+        </mxCell>
+
+        <mxCell id="alb" value="Application Load Balancer&#10;dubba-alb&#10;:80 -&gt; stable public DNS" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="340" y="490" width="300" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="albsg" value="ALBSecurityGroup: 80 from 0.0.0.0/0" style="text;html=1;fontSize=10;fontColor=#666666;align=center;" vertex="1" parent="1">
+          <mxGeometry x="340" y="572" width="300" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ecs" value="ECS Fargate&#10;dubba-cluster / dubba-service&#10;task family: dubba-task (1 vCPU / 3GB)&#10;container: dubba, port 8000&#10;api.py -- /health /auth /chat /close&#10;&#10;(image pulled from ECR, secrets&#10;injected from SSM, both at launch)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="340" y="650" width="300" height="160" as="geometry" />
+        </mxCell>
+
+        <mxCell id="taskgsg" value="DubbaTaskSecurityGroup: 8000 ONLY from the ALB security group (has a public IP, still not directly reachable)" style="text;html=1;fontSize=10;fontColor=#666666;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="340" y="812" width="300" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="privsubnet" value="Private Subnets (2 AZs) -- no internet route" style="rounded=0;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=10;fillColor=#f5f5f5;strokeColor=#999999;dashed=1;fontSize=11;fontStyle=2;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="730" y="440" width="330" height="230" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rds" value="RDS PostgreSQL 16.15 + pgvector&#10;dubba-rds -- db.t4g.micro, single-AZ&#10;policy_chunks, tickets, checkpoints" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="760" y="500" width="270" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rdssg" value="RDSSecurityGroup: 5432 ONLY from the ECS task security group" style="text;html=1;fontSize=10;fontColor=#666666;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="760" y="602" width="270" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- ================= RIGHT COLUMN ================= -->
+
+        <mxCell id="llms" value="Anthropic API / Groq API&#10;outbound direct -- public subnet" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1420" y="490" width="220" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="aas" value="Application Auto Scaling&#10;target-tracking, ECSServiceAverageCPUUtilization&#10;target 60%, min 1 / max 4 tasks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1420" y="650" width="220" height="110" as="geometry" />
+        </mxCell>
+
+        <!-- ================= CLIENT ================= -->
+        <!-- Positioned to the LEFT of the ALB/ECS column, not directly below it:
+             straight-below would force the edge to cross through the ECS box -->
+
+        <mxCell id="client" value="Client / curl / reviewer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="20" y="600" width="200" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ================= EDGES ================= -->
+
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="github" target="gha">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e2" value="AssumeRoleWithWebIdentity" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="gha" target="oidc">
+          <mxGeometry x="-0.1" relative="1" as="geometry">
+            <mxPoint as="offset" y="-16" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e3" value="eval-gate fetches secrets" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;dashed=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.3;entryY=1;entryDx=0;entryDy=0;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="oidc" target="ssm">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e4" value="build-and-push" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="oidc" target="ecr">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Explicit waypoints: down through the narrow gap between the VPC
+             border and the public-subnet border (x=285, left of the public
+             subnet's own x=300 edge), well clear of its title text, then right
+             into ECS's left edge -->
+        <mxCell id="e5" value="deploy: new task def revision" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;exitX=0.3;exitY=1;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="oidc" target="ecs">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="285" y="330" />
+              <mxPoint x="285" y="730" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e8" value=":80 HTTP" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="client" target="alb">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e9" value=":8000 target group" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="alb" target="ecs">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e10" value=":5432 DATABASE_URL" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;exitX=1;exitY=0.15;exitDx=0;exitDy=0;entryX=0;entryY=0.3;entryDx=0;entryDy=0;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="ecs" target="rds">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;exitX=1;exitY=0.45;exitDx=0;exitDy=0;entryX=0;entryY=0.3;entryDx=0;entryDy=0;" edge="1" parent="1" source="ecs" target="llms">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e12" value="scales DesiredCount" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=10;exitX=0;exitY=0.3;exitDx=0;exitDy=0;entryX=1;entryY=0.75;entryDx=0;entryDy=0;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="aas" target="ecs">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -12,7 +12,7 @@
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
         },
         "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:chaisthra/dubba-E-commerce-Customer-Support-Langraph-Agent:*"
+          "token.actions.githubusercontent.com:sub": "repo:chaisthra@105247178/dubba-E-commerce-Customer-Support-Langraph-Agent@1316830650:*"
         }
       }
     }

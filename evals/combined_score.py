@@ -123,7 +123,19 @@ async def main(
 
     if save_baseline:
         baseline_path.write_text(json.dumps(current, indent=2))
+        # Also snapshot the per-ticket results at this moment -- baseline.json
+        # only ever held the aggregate score, which is enough for the CI gate's
+        # own pass/fail check, but not enough to answer "which specific tickets
+        # changed" later (evals/before_after.py's job). trajectory_out/judge_out
+        # get overwritten by every subsequent run, so without this copy the
+        # per-ticket baseline state would be unrecoverable the moment anyone ran
+        # the eval again for any other reason.
+        baseline_trajectory_path = baseline_path.parent / "baseline_trajectory_results.json"
+        baseline_judge_path = baseline_path.parent / "baseline_judge_results.json"
+        baseline_trajectory_path.write_text(trajectory_out.read_text())
+        baseline_judge_path.write_text(judge_out.read_text())
         print(f"\nSaved as new baseline: {baseline_path}")
+        print(f"Per-ticket snapshots: {baseline_trajectory_path}, {baseline_judge_path}")
         return 0
 
     if not gate:

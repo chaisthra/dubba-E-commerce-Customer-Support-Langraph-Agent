@@ -41,8 +41,9 @@ writing near-identical answers.
 - Python 3.10+ (developed against 3.13/3.14)
 - An [Anthropic API key](https://console.anthropic.com/)
 - A [Langfuse](https://cloud.langfuse.com) account (free tier is fine) for tracing
-- No Docker, no external DB server — Chroma runs in-memory and long-term memory is a
-  local SQLite file, both created automatically on first run.
+- Docker (for local Postgres+pgvector — `docker compose up -d`) — see
+  [Assignment 2](#assignment-2--observability-evaluation-regression-gate-aws-deployment)
+  below for the full setup including tracing, evals, and AWS deployment.
 
 ## Setup
 
@@ -68,12 +69,19 @@ copy .env.example .env
 # now edit .env and fill in ANTHROPIC_API_KEY, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY
 ```
 
-`.env` expects exactly these variable names:
+`.env` expects exactly these variable names (see `.env.example`):
 ```
 ANTHROPIC_API_KEY=
+GROQ_API_KEY=
 LANGFUSE_PUBLIC_KEY=
 LANGFUSE_SECRET_KEY=
-LANGFUSE_BASE_URL=https://cloud.langfuse.com
+LANGFUSE_BASE_URL=http://localhost:3000
+DATABASE_URL=postgresql://dubba:dubba@localhost:5433/dubba
+```
+
+Start Postgres+pgvector before running the app:
+```bash
+docker compose up -d
 ```
 
 ## Running it
@@ -94,8 +102,8 @@ Access code: 4821
 ```
 **Ending a session** — type `exit`, `quit`, or `bye`. You'll be asked "was your issue
 resolved today?" — the answer is recorded as `closure_reason` (`resolved` /
-`abandoned`) when the session is written to long-term memory
-(`memory/long_term_memory.db`). Closing the terminal or hitting Ctrl+C also works —
+`abandoned`) when the session is written to long-term memory (the `tickets` table
+in Postgres). Closing the terminal or hitting Ctrl+C also works —
 that's caught explicitly too, saved as `abandoned` rather than silently dropped, and
 the MCP server subprocess is shut down cleanly either way.
 
@@ -111,24 +119,48 @@ agent should say so rather than stretch the pricing doc to answer it.
 ## Project structure
 
 ```
-main.py              entry point -- login, then the turn loop (--mode=loop|graph)
+main.py              CLI entry point -- login, then the turn loop (--mode=loop|graph)
+api.py               HTTP entry point -- FastAPI, what runs in the ECS/Fargate deployment
+Dockerfile           builds api.py into the image pushed to ECR
 harness/
   loop.py             stage-1 hand-rolled while-loop harness (no tools)
   graph.py             LangGraph harness -- real MCP tool calls, permission-scoped
   auth.py               mock login (email + access code)
   permissions.py        the permission-scoping check -- one clear function per action type
   schema.py              shape/type validation for a proposed action
-  llm_client.py           Anthropic provider abstraction, primary+fallback model chain
-  prompts.py               versioned system prompts
+  llm_client.py           token counting, PRIMARY_MODEL/FALLBACK_MODEL constants
+  llm_provider.py           Anthropic+Groq provider abstraction with automatic fallback chain
+  summarizer.py             rolling short-term-memory summarization (harness-computed structured fields + one LLM call for prose)
+  prompts.py               versioned system prompts (log/prompts/CHANGELOG.md)
   mcp_client.py             async stdio client wrapper for the MCP server subprocess
 mcp_server/
   server.py            MCP server exposing lookup_order, check_account_status, search_policy
   mock_data.py           mock order + account DB, behind get_order()/get_account()
 rag/
-  retriever.py          Chroma + sentence-transformers retrieval over policy_docs/
-  policy_docs/            6 policy docs (refunds, returns, delays, pricing, suspension, subscriptions)
+  store.py               Postgres+pgvector backend (policy_chunks table)
+  retriever.py            sentence-transformers embeddings + chunking over policy_docs/
+  policy_docs/              6 policy docs (refunds, returns, delays, pricing, suspension, subscriptions)
 memory/
-  store.py              long-term ticket history (SQLite this phase -- see below)
+  checkpointer.py        LangGraph's Postgres checkpointer (short-term, per-thread_id state)
+  store.py                long-term ticket history (Postgres `tickets` table)
+evals/
+  golden_dataset.json     15 test tickets, expected_trajectory + expected_answer per ticket
+  trajectory_eval.py       rule-based trajectory eval (section 2.2)
+  llm_judge.py              fact-checking LLM-as-judge (section 2.3)
+  combined_score.py          combines both into one score, baseline save/compare, the CI gate's actual pass/fail logic
+  baseline.json               stored known-good score, read by CI
+.github/workflows/
+  ci-cd.yml               eval-gate -> build-and-push -> deploy pipeline
+  deploy-no-gate.yml        same pipeline minus eval-gate, for the "what a missing gate costs" demo
+infra/
+  aws-network-rds-ecr.yaml   private subnets, RDS PostgreSQL+pgvector, ECR (deploy first)
+  aws-ecs-alb.yaml             ALB, ECS Fargate service/task, autoscaling (deploy second)
+  langfuse-ec2.yaml             self-hosted Langfuse on EC2 (auxiliary tracing infra, separate from the graded deployment)
+  teardown-aws-deploy.sh          tears down the two AWS deploy stacks
+  teardown-langfuse-ec2.sh          tears down the Langfuse EC2 stack
+  push-secrets-to-ssm.sh             pushes ANTHROPIC_API_KEY/GROQ_API_KEY to SSM
+log/
+  DEV_LOG.md, DECISIONS.md, todos.md, loophole.md, learnings/   dated project history, decisions, open items, and the required "confident wrong path" writeups
 requirements.txt     Python dependencies
 .env.example          template for .env -- exact variable names the code expects
 ```
@@ -180,18 +212,303 @@ weak, topically-adjacent matches surface for that query, no strong hit). The sys
 prompt explicitly forbids stretching an adjacent doc (e.g. the general shipping-fee
 doc) to sound like it answers something more specific it doesn't cover.
 
-**Long-term memory: SQLite now, Postgres and AWS RDS later.** `memory/store.py`
-exposes `get_ticket_history()` / `save_ticket_summary()` as the interface every
-caller uses — swapping the backing store later only touches this one file. The same
-principle applies to the mock order/account data in `mcp_server/mock_data.py`:
-everything above it calls `get_order()` / `get_account()`, never the underlying
-dicts directly.
+**Long-term and short-term memory: Postgres, RDS in production.** `memory/store.py`
+exposes `get_customer_history()` / `save_ticket_summary()` as the interface every
+caller uses; `memory/checkpointer.py` wraps LangGraph's own `AsyncPostgresSaver` for
+short-term, per-`thread_id` conversation state. Both read `DATABASE_URL` alone —
+local Docker Postgres today, AWS RDS in the Assignment 2 deployment, no code change
+between them. The same principle applies to the mock order/account data in
+`mcp_server/mock_data.py`: everything above it calls `get_order()` / `get_account()`,
+never the underlying dicts directly.
 
-**Every LLM call has a fallback**, not a single hard-coded model:
-`claude-sonnet-4-5-20250929` primary (chosen for tool-calling reliability, since the
-harness's correctness depends on clean structured output), `claude-haiku-4-5-20251001`
-fallback on a hard call failure only (timeout, API error, malformed response) — never
-because the harness disliked a valid answer's quality.
+**Every LLM call has a fallback, across two providers, not a single hard-coded
+model.** `harness/llm_provider.py`'s `ProviderChain`: Anthropic first
+(`claude-sonnet-4-5-20250929` primary, `claude-haiku-4-5-20251001` fallback — chosen
+for tool-calling reliability, since the harness's correctness depends on clean
+structured output), Groq second, reached only once the entire Anthropic provider is
+exhausted, not on a single model's hiccup. `temperature=0` on every call, both
+providers. The rolling short-term-memory summarizer (`harness/summarizer.py`)
+deliberately stays on Groq alone, regardless of Anthropic's health — background
+housekeeping, not a customer-facing answer.
+
+**RAG runs against Postgres+pgvector**, not a separate vector-store process —
+`rag/store.py`'s `policy_chunks` table lives in the same Postgres instance as the
+checkpointer and `tickets` table (local Docker today, the same RDS instance in the
+Assignment 2 deployment). Chunked by markdown `## ` section, embedded with
+`sentence-transformers/all-MiniLM-L6-v2`, retrieved via pgvector's `<=>` cosine-
+distance operator with a `MIN_SIMILARITY` floor enforced in code, not left to a
+prompting instruction.
 
 **Every step is traced in Langfuse**: one trace per user turn, spans per category and
 per tool call, so grounding and permission decisions are checkable, not just claimed.
+See [Assignment 2](#assignment-2--observability-evaluation-regression-gate-aws-deployment)
+below for the full tracing/eval/gate/deployment setup.
+
+---
+
+## Assignment 2 — Observability, Evaluation, Regression Gate, AWS Deployment
+
+### 1. Tracing setup
+
+Every LangGraph node (`harness/graph.py`) and MCP tool call produces a real
+Langfuse span — `ticket-turn` (the whole turn) as the parent, with
+`classify-intent`, `propose-action`, `execute-tool:*`, `evaluate-sufficiency`,
+`respond-decision`, `finalize-response`, `rolling-summarize`, and the HITL/
+rejection spans nested underneath. Nothing hand-rolled — the `langfuse` SDK's
+`start_as_current_observation()` context manager, `get_client()` once at import
+time, per `harness/graph.py`.
+
+**Two Langfuse deployments exist, for different purposes — don't confuse them:**
+
+| | Purpose | `.env` values |
+|---|---|---|
+| **Local self-hosted** (`docker compose`, cloned sibling repo — see `log/DECISIONS.md`) | Local dev, `python main.py`, this repo's own eval scripts | `LANGFUSE_BASE_URL=http://localhost:3000` + that instance's project keys |
+| **EC2** (`infra/langfuse-ec2.yaml`) | Auxiliary — a real, internet-reachable instance for manual inspection; **not** used by CI (see below) | Fetch from SSM: `aws ssm get-parameter --name /langfuse-ec2/base-url ...` etc. |
+
+Exact env vars the code reads (`.env.example`):
+```
+LANGFUSE_PUBLIC_KEY=
+LANGFUSE_SECRET_KEY=
+LANGFUSE_BASE_URL=http://localhost:3000
+```
+
+**One-time setup for local self-hosted Langfuse**: clone `langfuse/langfuse` as a
+sibling directory, `docker compose up -d` there (6 containers: Postgres,
+ClickHouse, Redis, MinIO, langfuse-web, langfuse-worker), then copy the
+headless-init project keys from that clone's own `.env` into this repo's `.env`.
+
+**Why CI doesn't need Langfuse reachable at all**: the SDK degrades gracefully
+with no credentials set — logs a warning, swaps in a no-op OTel tracer, never
+raises (verified directly against the installed SDK, `langfuse/_client/client.py`).
+`eval-gate` (below) never sets `LANGFUSE_*`, so it runs identically whether or not
+Langfuse is reachable from GitHub's runners — which it deliberately isn't, since
+Langfuse EC2 is kept private (see `log/DECISIONS.md`).
+
+### 2. Trajectory eval
+
+```bash
+python evals/trajectory_eval.py
+```
+Runs all 15 test tickets in `evals/golden_dataset.json` (5 ticket categories:
+`order_status`, `delivery_issue`, `refund_request`, `subscription_account`,
+`other`) through the real agent, checks `session_tool_log` against each ticket's
+`expected_trajectory` (superset check — extra tool calls are fine, missing
+required ones fail), writes full results to `evals/trajectory_eval_results.json`.
+Needs Postgres up (`docker compose up -d`) and real `ANTHROPIC_API_KEY`/
+`GROQ_API_KEY` — same requirements as `python main.py`.
+
+The dataset also carries `expected_answer`/`expected_source`/`expected_escalation`
+per ticket (used by the LLM judge, next) and `notes` explaining what each ticket
+specifically tests — see the file directly for the full picture, including two
+tickets deliberately checking the same lit-candle-disqualification and honest-gap
+behaviors documented in `log/learnings/`.
+
+```bash
+python evals/llm_judge.py --runs 5
+```
+Fact-checking rubric (1–5, `temperature=0`), run against `evals/golden_dataset.json`
++ `evals/trajectory_eval_results.json`'s actual replies + the real policy doc text
++ the real order record (`mcp_server/mock_data.get_order()`) as reference — never
+the agent's own reply used as its own reference. Multiple runs per ticket
+(default 3, `--runs 5` for a closer look) because judge scores are genuinely
+non-deterministic even at `temperature=0` — confirmed directly, several tickets
+showed real run-to-run score variance (see `log/learnings/2026-08-29-llm-judge-run2-findings.md`).
+
+```bash
+python evals/combined_score.py
+```
+Runs both of the above fresh and combines them (50% trajectory pass rate + 50%
+judge average, both rescaled to 0–100) into one number — this combined score is
+what the baseline and the CI gate actually track, not either signal alone (see
+the Defensible justifications below for why).
+
+**Where the baseline lives**: `evals/baseline.json`, a committed JSON file (current
+value: `combined_score: 71.92`). To establish a new one after a real, reviewed
+improvement:
+```bash
+python evals/combined_score.py --save-baseline
+```
+
+### 3. CI gate configuration
+
+**File**: `.github/workflows/ci-cd.yml`, job `eval-gate`. **Pass/fail logic lives
+in Python** (`evals/combined_score.py --gate`), not the YAML, per the assignment's
+own build guide — the workflow just runs the script and lets its exit code decide.
+
+**What it checks**: the combined score (trajectory pass rate + LLM-judge average,
+50/50) against `evals/baseline.json`, using 3 judge runs per ticket (not 5 — kept
+lower than the manual-inspection default to bound CI time/cost, still satisfies
+"more than once" per Session 3's own non-determinism finding).
+
+**Threshold**: fails if the combined score drops **more than 10 points** from
+baseline (`REGRESSION_THRESHOLD_POINTS = 10` in `evals/combined_score.py`) — a
+**relative** check against the stored baseline, not a fixed pass/fail bar. See
+Defensible justification #1 below for why 10.
+
+**The `needs:` chain is the entire mechanism**: `build-and-push` needs `eval-gate`,
+`deploy` needs `build-and-push`. Nothing downstream runs if the gate script exits
+non-zero — no conditional logic anywhere in the YAML.
+
+**Authentication**: OIDC only. `eval-gate` assumes `dubba-github-actions-deploy`
+(trust policy scoped to this exact repo, `infra/github-oidc-trust-policy.json`)
+via `aws-actions/configure-aws-credentials@v4`, then fetches
+`ANTHROPIC_API_KEY`/`GROQ_API_KEY` from AWS SSM Parameter Store
+(`/dubba/anthropic-api-key`, `/dubba/groq-api-key`) at runtime — **no static AWS
+keys anywhere in this repo**, confirmed by grep (`AWS_ACCESS_KEY_ID`/
+`AWS_SECRET_ACCESS_KEY` appear nowhere in `.github/workflows/`).
+
+**Demoing a live regression** (the required "watch it actually block" evidence):
+add `AGENT_REGRESSED: "true"` to `eval-gate`'s `env:` block in `ci-cd.yml` (one
+line), push, watch the run fail on GitHub, then revert. `harness/graph.py` reads
+this exact env var and strips `lookup_order` out of the tools the agent can call
+entirely — not discouraged in prose, structurally absent from the tool-calling API
+call itself — so every ticket needing an order lookup fails the trajectory check.
+`workflow_dispatch`'s `agent_regressed` input does the same thing without a
+commit, for quick manual testing. `.github/workflows/deploy-no-gate.yml` is the
+same pipeline with `eval-gate` entirely removed (triggers only on a
+`no-gate-demo` branch or manual dispatch, never `main`/`w1a-harness`) — the "what
+does a missing gate actually cost" half of the demo.
+
+### 4. Reproducing the before/after comparison
+
+```bash
+python evals/before_after.py
+```
+Runs a fresh eval, compares it against the saved baseline
+(`evals/baseline.json` + the per-ticket snapshots `evals/baseline_trajectory_results.json`/
+`evals/baseline_judge_results.json`, all written together by
+`python evals/combined_score.py --save-baseline`), and prints **both** the
+aggregate before/after numbers (`BEFORE: combined=71.92 (...) / AFTER:
+combined=52.1 (...) / DROP: combined score dropped 19.82 points`) **and** a
+per-ticket diff — which specific tickets' trajectory pass/fail status flipped,
+and which tickets' judge average moved by a full point or more (a full point,
+not any movement at all, to distinguish a real change from ordinary judge
+run-to-run noise — see the non-determinism finding in justification #1 below).
+
+To demo the regressed case specifically:
+```bash
+AGENT_REGRESSED=true python evals/before_after.py
+```
+
+To diff two already-saved result sets without re-running anything (e.g. CI
+artifacts from two different pipeline runs):
+```bash
+python evals/before_after.py --after-only --after-trajectory <path> --after-judge <path>
+```
+
+### 5. Defensible justifications
+
+**Why the regression threshold is 10 points, on a 50/50 trajectory+judge combined
+score:**
+A tighter threshold (e.g. 2–3 points) would fail the gate on ordinary LLM-judge
+noise alone — this session's own judge runs showed real tickets swinging 2–3
+points between identical, unchanged runs (`log/learnings/2026-08-29-llm-judge-run2-findings.md`:
+several tickets scored anywhere from 2 to 5 across 5 runs with nothing about the
+agent changed). A threshold that tight would make the gate cry wolf on noise, not
+signal — exactly the kind of gate nobody trusts after the third false alarm. A
+much looser threshold (e.g. 30+ points) would let a real, meaningful regression
+through — our own `lit_candle_return_denied` finding (a genuine policy-compliance
+failure, not noise) accounts for real, multi-point swings in the judge component
+on its own. 10 points sits above the observed noise floor for a single ticket's
+judge variance, but well below what one or two genuinely broken tickets would
+cost the aggregate score — tight enough to catch a real regression, loose enough
+not to flap on judge noise.
+
+**What the gate actually checks, and what that means it can't catch:**
+It checks a **combined** trajectory (rule-based, did the required tools get
+called) and LLM-judge (fact-checking, is the answer grounded) score — deliberately
+both, not one alone, because this session found real cases where each one misses
+what the other catches: `lit_candle_return_denied` had a perfect trajectory
+(exactly the required tools, in order) but a wrong, policy-contradicting answer —
+a trajectory-only gate would have waved it through clean. Conversely, a
+judge-only gate has no way to catch a skipped or wrong-argument tool call whose
+final answer still happens to read plausibly — the whole "confident wrong path"
+premise this assignment is built around. What it still can't catch: cost/latency
+regressions (a correct but 10x-slower response scores the same), UI/UX
+regressions (there is none to check), anything the 15-ticket golden dataset
+doesn't cover (a genuinely novel failure mode outside these 15 scenarios), and —
+inherent to any LLM-judge — some irreducible run-to-run noise even after
+averaging 3 runs.
+
+### 6. AWS architecture
+
+![AWS deployment architecture: GitHub Actions authenticating via OIDC, pushing to ECR and deploying to ECS Fargate behind an ALB, with RDS PostgreSQL+pgvector in private subnets, secrets from SSM Parameter Store, and Application Auto Scaling on ECS CPU utilization](assets/aws-deployment-architecture.png)
+
+Deployed in two ordered CloudFormation stacks (ECS needs a real image already in
+ECR before it can report healthy — ECR has to exist, and be populated, before the
+ECS stack can succeed):
+
+| Resource | Name / how to fetch |
+|---|---|
+| VPC | `vpc-01bf8f177b6df0109` (existing default VPC — also hosts Langfuse EC2) |
+| ECR repository | `dubba` (SHA-tagged, `IMMUTABLE`) |
+| RDS instance identifier | `dubba-rds` (PostgreSQL 16.15, `db.t4g.micro`, single-AZ, private subnet, `pgvector` extension) |
+| ECS cluster | `dubba-cluster` |
+| ECS service | `dubba-service` |
+| ECS task definition family | `dubba-task` (Fargate, 1 vCPU / 3 GB) |
+| Container name | `dubba` |
+| ALB DNS name | `aws cloudformation describe-stacks --stack-name dubba-ecs-alb --query "Stacks[0].Outputs[?OutputKey=='ALBDNSName'].OutputValue" --output text` |
+| Autoscaling | Target-tracking, `ECSServiceAverageCPUUtilization`, target **60%**, min **1** / max **4** tasks (`infra/aws-ecs-alb.yaml`'s `MinTaskCount`/`MaxTaskCount`/`CPUTargetValue` parameters) |
+
+**pgvector wiring**: `rag/store.py`'s `connect()` runs `CREATE EXTENSION IF NOT
+EXISTS vector` and creates `policy_chunks` (an HNSW-indexed `vector(384)` column)
+against whatever `DATABASE_URL` points at — local Docker Postgres today, `dubba-rds`
+in this deployment, no code difference between them. The ECS task definition
+injects `DATABASE_URL` via the `secrets` field (SSM parameter `/dubba/database-url`,
+built from the RDS endpoint output + the master password supplied at RDS-stack
+deploy time — never baked into the task definition as plaintext).
+
+**Networking**: ECS tasks sit in the VPC's existing **public** subnets with a
+public IP, but are reachable only through the ALB's security group — not
+`0.0.0.0/0`, not even a specific IP (`infra/aws-ecs-alb.yaml`'s
+`DubbaTaskSecurityGroup`). Chosen over a private subnet + NAT Gateway to avoid
+~$32–45/month in NAT Gateway cost for a teaching deployment while still meeting
+the "only the ALB can reach the task directly" requirement via security groups
+rather than subnet privacy. RDS, by contrast, sits in genuinely private subnets
+with no internet route at all (`infra/aws-network-rds-ecr.yaml`) — required, not
+optional, since RDS itself needs no outbound internet access the way ECS does.
+
+### 7. Deploy pipeline
+
+`.github/workflows/ci-cd.yml` — `eval-gate` → `build-and-push` → `deploy`.
+`aws-actions/configure-aws-credentials@v4` + OIDC (`role-to-assume:
+${{ vars.AWS_DEPLOY_ROLE_ARN }}`) in every AWS-touching job; **no
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` anywhere in this repository** —
+verified directly, not just claimed:
+```bash
+grep -rn "AWS_ACCESS_KEY_ID\|AWS_SECRET_ACCESS_KEY" .github/ infra/
+# (no matches)
+```
+Images tagged by `${{ github.sha }}`, never `latest`-only (§2.6.1's audit-trail
+requirement).
+
+**Required GitHub repo variables** (Settings → Secrets and variables → Actions →
+Variables — set once the AWS stacks above exist):
+```
+AWS_DEPLOY_ROLE_ARN, AWS_REGION, ECR_REPOSITORY, ECS_CLUSTER, ECS_SERVICE, ECS_TASK_FAMILY, CONTAINER_NAME
+```
+No GitHub Actions *Secrets* are used for AWS or the LLM provider keys — everything
+credential-shaped is fetched from SSM Parameter Store at runtime via the OIDC
+role (`infra/push-secrets-to-ssm.sh` pushes `ANTHROPIC_API_KEY`/`GROQ_API_KEY`;
+the RDS stack's own deploy step pushes `DATABASE_URL`).
+
+### 8. Teardown
+
+```bash
+./infra/teardown-aws-deploy.sh       # ALB, ECS, autoscaling, then private subnets, RDS, ECR (in that order -- ECS stack depends on the network stack's resources)
+./infra/teardown-langfuse-ec2.sh     # separate stack -- Langfuse EC2, not touched by the above
+```
+Both are plain `aws cloudformation delete-stack` + `wait stack-delete-complete` —
+tested against a real deployed stack, not just described (see this repo's own
+`log/DEV_LOG.md` for the Langfuse EC2 deploy/redeploy history this was exercised
+against). `EmptyOnDelete: true` on the ECR repository (`infra/aws-network-rds-ecr.yaml`)
+means teardown succeeds even with images still pushed to it — no manual
+`aws ecr batch-delete-image` step needed first.
+
+### 9. Bedrock-ready path
+
+Not attempted this assignment — explicitly deferred, not forgotten. §2.6.4 is
+optional and out of scope for this submission; `harness/llm_provider.py`'s
+existing `Provider`/`ProviderChain` abstraction (built for the Anthropic/Groq
+fallback chain) is the natural seam a future `BedrockProvider` stub would slot
+into, whenever that gets picked up.

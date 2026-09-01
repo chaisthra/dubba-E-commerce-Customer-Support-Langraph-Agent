@@ -97,7 +97,7 @@ Resources:
   DubbaTaskSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: dubba ECS task -- inbound 8000 ONLY from the ALB's security group, nothing else, despite the task itself sitting in a public subnet.
+      GroupDescription: dubba ECS task -- inbound 8000 ONLY from the ALB security group, nothing else, despite the task itself sitting in a public subnet.
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -114,7 +114,7 @@ Resources:
       FromPort: 5432
       ToPort: 5432
       SourceSecurityGroupId: !Ref DubbaTaskSecurityGroup
-      Description: The one thing allowed to reach RDS -- the ECS task's own security group, added here since it doesn't exist until this stack does.
+      Description: The one thing allowed to reach RDS -- the ECS task own security group, added here since it does not exist until this stack does.
 
   ECSCluster:
     Type: AWS::ECS::Cluster
