@@ -128,6 +128,17 @@ class GroqProvider(Provider):
     # (the limit is per-model and per-minute, so it often clears fast).
     MAX_RATE_LIMIT_RETRIES = 3
     BASE_BACKOFF_SECONDS = 1.0
+    # Groq's 429 body can suggest a genuinely long wait -- a real one seen this
+    # session said "try again in 20m45.888s" (a per-model DAILY token cap, not a
+    # per-minute one). _parse_retry_after_seconds honors that value as a floor
+    # with no ceiling, so a single rate-limited model could block this whole
+    # request for ~20 minutes before ever falling through to the next model in
+    # MODELS -- confirmed live: a CI eval-gate run stalled ~23 minutes on exactly
+    # this path. Capped here so MAX_RATE_LIMIT_RETRIES worth of waits on one
+    # model costs at most MAX_BACKOFF_SECONDS * MAX_RATE_LIMIT_RETRIES (90s),
+    # then falls through to the next model instead of blocking on a cap that
+    # won't clear within this request's lifetime regardless of how long we wait.
+    MAX_BACKOFF_SECONDS = 30.0
 
     # A 400 from disobeying a forced/required tool_choice is a genuinely
     # different failure than a rate limit -- not capacity-related, so no
@@ -193,8 +204,10 @@ class GroqProvider(Provider):
                     rate_limit_attempt += 1
                     if rate_limit_attempt > self.MAX_RATE_LIMIT_RETRIES:
                         break  # exhausted retries on this model -- fall through to the next one
-                    delay = _parse_retry_after_seconds(str(exc)) or (
-                        self.BASE_BACKOFF_SECONDS * (2 ** (rate_limit_attempt - 1))
+                    delay = min(
+                        _parse_retry_after_seconds(str(exc))
+                        or (self.BASE_BACKOFF_SECONDS * (2 ** (rate_limit_attempt - 1))),
+                        self.MAX_BACKOFF_SECONDS,
                     )
                     time.sleep(delay)
                     continue  # retry the SAME model, not the next one -- per-model limit, likely to clear
