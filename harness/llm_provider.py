@@ -178,14 +178,23 @@ class ProviderChain:
         force_tool: str | None = None,
         any_tool: bool = False,
     ) -> LLMResponse:
-        last_error: Exception | None = None
+        errors: list[tuple[str, Exception]] = []
         for provider in self.providers:
             try:
                 return provider.create(system, messages, tools=tools, force_tool=force_tool, any_tool=any_tool)
             except Exception as e:
-                last_error = e
+                errors.append((provider.name, e))
                 continue
-        raise last_error
+
+        # Every provider's failure preserved, not just the last one -- a bare
+        # `raise last_error` here previously discarded every earlier provider's
+        # error the moment a later one also failed, making it structurally
+        # impossible to see WHY the primary (Anthropic) provider fell through,
+        # only ever showing the final (Groq) failure. Chained via `from` onto
+        # the last real exception so the traceback still has a real cause, not
+        # just this summary string.
+        summary = "; ".join(f"{name}: {err}" for name, err in errors)
+        raise RuntimeError(f"ProviderChain: every provider failed -- {summary}") from errors[-1][1]
 
 
 def _to_groq_tools(tools: list[dict]) -> list[dict]:

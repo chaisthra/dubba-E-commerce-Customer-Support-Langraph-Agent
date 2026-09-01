@@ -87,10 +87,23 @@ jobs:
         # combined score to baseline) doesn't depend on traces landing anywhere.
         # Langfuse EC2 stays private, reachable by your own IP and later by the
         # deployed ECS agent -- not by CI. See log/DECISIONS.md.
+        #
+        # ::add-mask:: is required here, not optional -- GitHub's automatic log
+        # redaction ONLY knows to hide values sourced from the `secrets.*`
+        # context. These values come from AWS SSM via our own `aws` call, so
+        # GitHub has no idea they're sensitive; without an explicit mask, a
+        # LATER step's own standard `uses:`-action log dump (e.g. a "Post"
+        # cleanup phase, which runs at the end of the job after these are
+        # already in $GITHUB_ENV) could print them in plaintext. See
+        # log/DECISIONS.md for the real run that surfaced this.
         run: |
+          ANTHROPIC_KEY=$(aws ssm get-parameter --name /dubba/anthropic-api-key --with-decryption --query Parameter.Value --output text)
+          GROQ_KEY=$(aws ssm get-parameter --name /dubba/groq-api-key --with-decryption --query Parameter.Value --output text)
+          echo "::add-mask::$ANTHROPIC_KEY"
+          echo "::add-mask::$GROQ_KEY"
           {
-            echo "ANTHROPIC_API_KEY=$(aws ssm get-parameter --name /dubba/anthropic-api-key --with-decryption --query Parameter.Value --output text)"
-            echo "GROQ_API_KEY=$(aws ssm get-parameter --name /dubba/groq-api-key --with-decryption --query Parameter.Value --output text)"
+            echo "ANTHROPIC_API_KEY=$ANTHROPIC_KEY"
+            echo "GROQ_API_KEY=$GROQ_KEY"
           } >> "$GITHUB_ENV"
 
       - name: Run regression eval gate
