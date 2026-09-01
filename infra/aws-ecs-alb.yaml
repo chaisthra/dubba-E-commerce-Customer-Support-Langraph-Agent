@@ -191,8 +191,14 @@ Resources:
               ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/langfuse-ec2/public-key"
             - Name: LANGFUSE_SECRET_KEY
               ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/langfuse-ec2/secret-key"
+            # internal-base-url (private IP), NOT base-url (public EIP) -- a
+            # same-VPC caller addressing the public EIP hairpins through the IGW
+            # and back in, stripping the source security-group identity that
+            # LangfuseSecurityGroup's ingress rule matches on, so it silently
+            # times out. Confirmed via a live reachability test from inside the
+            # actual ECS task network path. See log/DECISIONS.md.
             - Name: LANGFUSE_BASE_URL
-              ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/langfuse-ec2/base-url"
+              ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/langfuse-ec2/internal-base-url"
           LogConfiguration:
             LogDriver: awslogs
             Options:

@@ -190,6 +190,15 @@ Resources:
           # this needs no IMDS call (and no IMDSv2 token dance) at all, and can't
           # race LangfuseEIPAssociation actually finishing.
           PUBLIC_IP="${LangfuseEIP}"
+          # Same-VPC callers (the ECS task) must use this, NOT the public IP above --
+          # a same-VPC caller addressing the public EIP hairpins out through the IGW
+          # and back in, which strips the source security-group identity that
+          # RDSIngressFromTask-style UserIdGroupPairs rules match on, so the SG rule
+          # silently never matches and the connection times out. Confirmed via a live
+          # reachability test from inside the actual ECS task network path: the
+          # public IP timed out after 10s, the private IP connected instantly and
+          # returned a real 200. See log/DECISIONS.md.
+          PRIVATE_IP="${LangfuseInstance.PrivateIp}"
 
           cat > .env <<EOF
           SALT=${!SALT}
@@ -224,6 +233,10 @@ Resources:
           # requires re-reading this template or SSHing into the instance.
           aws ssm put-parameter --region ${AWS::Region} --name /langfuse-ec2/base-url \
             --type String --overwrite --value "http://${!PUBLIC_IP}:3000"
+          # Separate from base-url above -- see the PRIVATE_IP comment earlier in
+          # this script for why the ECS task specifically needs this one instead.
+          aws ssm put-parameter --region ${AWS::Region} --name /langfuse-ec2/internal-base-url \
+            --type String --overwrite --value "http://${!PRIVATE_IP}:3000"
           aws ssm put-parameter --region ${AWS::Region} --name /langfuse-ec2/public-key \
             --type SecureString --overwrite --value "${!INIT_PROJECT_PUBLIC_KEY}"
           aws ssm put-parameter --region ${AWS::Region} --name /langfuse-ec2/secret-key \
