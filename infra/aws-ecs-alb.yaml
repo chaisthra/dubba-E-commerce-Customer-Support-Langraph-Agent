@@ -152,7 +152,9 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: ssm:GetParameters  # plural -- the actual permission the ECS agent needs for task-definition `secrets`, distinct from ssm:GetParameter (singular) used elsewhere in this repo's own scripts
-                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/dubba/*"
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/dubba/*"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/langfuse-ec2/*"
               - Effect: Allow
                 Action: kms:Decrypt
                 Resource: "*"
@@ -178,6 +180,19 @@ Resources:
               ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/dubba/groq-api-key"
             - Name: DATABASE_URL
               ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/dubba/database-url"
+            # Unlike eval-gate (deliberately no Langfuse, see log/DECISIONS.md),
+            # the DEPLOYED agent SHOULD trace for real -- this is genuine
+            # production traffic, not throwaway CI runs. These three params are
+            # published by infra/langfuse-ec2.yaml's own boot script, not by
+            # infra/push-secrets-to-ssm.sh -- read-only here, this stack never
+            # writes to them. Reachable because Langfuse EC2's security group
+            # explicitly allows this stack's DubbaTaskSecurityGroup.
+            - Name: LANGFUSE_PUBLIC_KEY
+              ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/langfuse-ec2/public-key"
+            - Name: LANGFUSE_SECRET_KEY
+              ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/langfuse-ec2/secret-key"
+            - Name: LANGFUSE_BASE_URL
+              ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/langfuse-ec2/base-url"
           LogConfiguration:
             LogDriver: awslogs
             Options:

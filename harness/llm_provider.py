@@ -14,6 +14,8 @@ instantiate GroqProvider() directly instead of going through get_llm_client().
 """
 
 import json
+import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -100,8 +102,44 @@ class AnthropicProvider(Provider):
         ) from last_error
 
 
+# Groq's 429 body includes a human-readable hint like "Please try again in 60ms"
+# or "in 1.234s" -- parsed as a floor for the backoff sleep when present, since
+# it's a real, model-specific signal from the account's own per-model TPM window
+# (confirmed empirically: a real 429 named one specific model, "Limit 8000, Used
+# 6372" -- Groq's rate limits are per-model, not account-wide, which is why
+# retrying the SAME model after a short wait is worth doing before moving on).
+_RETRY_AFTER_RE = re.compile(r"try again in ([\d.]+)(ms|s)\b")
+
+
+def _parse_retry_after_seconds(message: str) -> float | None:
+    match = _RETRY_AFTER_RE.search(message)
+    if not match:
+        return None
+    value, unit = match.groups()
+    seconds = float(value) / 1000 if unit == "ms" else float(value)
+    return seconds
+
+
 class GroqProvider(Provider):
     name = "groq"
+
+    # Rate-limit-specific retry knobs -- separate from the per-model fallback
+    # loop below. A 429 is worth retrying the SAME model after a short wait
+    # (the limit is per-model and per-minute, so it often clears fast).
+    MAX_RATE_LIMIT_RETRIES = 3
+    BASE_BACKOFF_SECONDS = 1.0
+
+    # A 400 from disobeying a forced/required tool_choice is a genuinely
+    # different failure than a rate limit -- not capacity-related, so no
+    # backoff delay needed -- but it's also not necessarily permanent: the
+    # SAME model, asked again, sometimes just complies the second time (this
+    # is a real, observed instructor-flagged case: their harness gets this
+    # same "wrong tool name" failure mode a genuine second attempt via an
+    # MCP-level error-and-retry loop; ours can't do that -- Groq's own API
+    # rejects the call server-side before we ever get a response object with
+    # a tool-call to feed back as an error -- so this is the closest
+    # equivalent: retry the model itself, not the tool-execution step).
+    MAX_TOOL_VALIDATION_RETRIES = 2
 
     # Order chosen by actually running each model against our real tool-calling loop
     # (forced single-tool AND any-of-N-tools, both used by this app) and verifying it
@@ -142,19 +180,38 @@ class GroqProvider(Provider):
 
         last_error: Exception | None = None
         for model in self.MODELS:
-            try:
-                response = self._client.chat.completions.create(
-                    model=model, messages=groq_messages, temperature=0, **kwargs
-                )
-                return _normalize_groq(response, model)
-            # Broad on purpose: a rate limit is one way a model can be unusable for
-            # this call, but so is a model disobeying a forced tool_choice (Groq
-            # validates that server-side and raises BadRequestError, a sibling
-            # APIStatusError subclass, not RateLimitError) -- either way, the fix is
-            # the same: move on to the next model in the chain rather than crash.
-            except groq.APIStatusError as exc:
-                last_error = exc
-                continue
+            rate_limit_attempt = 0
+            tool_validation_attempt = 0
+            while True:
+                try:
+                    response = self._client.chat.completions.create(
+                        model=model, messages=groq_messages, temperature=0, **kwargs
+                    )
+                    return _normalize_groq(response, model)
+                except groq.RateLimitError as exc:
+                    last_error = exc
+                    rate_limit_attempt += 1
+                    if rate_limit_attempt > self.MAX_RATE_LIMIT_RETRIES:
+                        break  # exhausted retries on this model -- fall through to the next one
+                    delay = _parse_retry_after_seconds(str(exc)) or (
+                        self.BASE_BACKOFF_SECONDS * (2 ** (rate_limit_attempt - 1))
+                    )
+                    time.sleep(delay)
+                    continue  # retry the SAME model, not the next one -- per-model limit, likely to clear
+                # Broad on purpose (and deliberately separate from RateLimitError
+                # above, which needs a delay, not an immediate reattempt): a
+                # model disobeying a forced/required tool_choice raises
+                # BadRequestError, a sibling APIStatusError subclass, server-side
+                # -- not capacity-related, so no delay, but worth a couple of
+                # immediate reattempts on the SAME model before giving up on it,
+                # since compliance is a per-call roll of the dice, not a fixed
+                # property of the model (see MAX_TOOL_VALIDATION_RETRIES above).
+                except groq.APIStatusError as exc:
+                    last_error = exc
+                    tool_validation_attempt += 1
+                    if tool_validation_attempt > self.MAX_TOOL_VALIDATION_RETRIES:
+                        break  # gave this model its chances -- fall through to the next one
+                    continue  # retry the SAME model immediately, no backoff needed
 
         raise RuntimeError(
             f"GroqProvider: all models failed ({self.MODELS}); last error: {last_error}"
