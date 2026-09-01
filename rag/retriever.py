@@ -1,18 +1,23 @@
 """
-RAG over Dubba's policy docs. Chroma (in-memory, no server process) + sentence-
+RAG over Dubba's policy docs. Postgres + pgvector (rag/store.py -- same Postgres
+instance as memory/store.py and memory/checkpointer.py, DATABASE_URL) + sentence-
 transformers embeddings. Chunked by markdown "## " sections -- the natural semantic
-boundary these docs already use.
+boundary these docs already use. Was ChromaDB (in-memory, no server process,
+rebuilt from scratch every subprocess start); migrated so retrieval is backed by
+the same durable Postgres the rest of the app already depends on, not a throwaway
+in-memory index -- see log/DECISIONS.md.
 
 No Langfuse calls in this file on purpose: this module runs inside the MCP server
 subprocess (mcp_server/server.py), which only inherits a minimal env allowlist
-(HOME/LOGNAME/PATH/SHELL/TERM/USER) -- no LANGFUSE_* credentials -- so a span opened
-here would silently go nowhere. Traceability instead comes from (a) the stderr log
-below (the assignment's literal "log or print which chunk(s) got used" requirement --
-stderr, never stdout: stdio MCP servers use stdout as the actual JSON-RPC protocol
-channel, so printing there corrupts the message stream) and (b) the existing Langfuse
-"tool" span in harness/graph.py's execute_tool_node, which already captures this
-function's full output (including chunk ids + similarity) in the parent process,
-which does have credentials.
+(HOME/LOGNAME/PATH/SHELL/TERM/USER) plus whatever harness/mcp_client.py explicitly
+adds (DATABASE_URL, for this file's own Postgres connection) -- no LANGFUSE_*
+credentials -- so a span opened here would silently go nowhere. Traceability instead
+comes from (a) the stderr log below (the assignment's literal "log or print which
+chunk(s) got used" requirement -- stderr, never stdout: stdio MCP servers use stdout
+as the actual JSON-RPC protocol channel, so printing there corrupts the message
+stream) and (b) the existing Langfuse "tool" span in harness/graph.py's
+execute_tool_node, which already captures this function's full output (including
+chunk ids + similarity) in the parent process, which does have credentials.
 
 Deliberately uncovered: none of the 6 policy docs mention international customs fees
 or import duties -- see log/DECISIONS.md. That's the "honest gap" case (assignment
@@ -22,8 +27,9 @@ or import duties -- see log/DECISIONS.md. That's the "honest gap" case (assignme
 import sys
 from pathlib import Path
 
-import chromadb
-from chromadb.utils import embedding_functions
+from sentence_transformers import SentenceTransformer
+
+from rag import store
 
 DOCS_DIR = Path(__file__).resolve().parent / "policy_docs"
 # 3 sometimes missed the right chunk for candle-specific condition questions (e.g.
@@ -38,8 +44,7 @@ TOP_K = 5
 # relying only on the prompt; will be tuned once real query volume exists.
 MIN_SIMILARITY = 0.6
 
-_client = chromadb.Client()
-_embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+_embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 def _chunk_doc(path: Path) -> list[dict]:
@@ -75,40 +80,25 @@ def _chunk_doc(path: Path) -> list[dict]:
     return chunks
 
 
-def _build_collection():
-    collection = _client.get_or_create_collection(name="policy_docs", embedding_function=_embed_fn)
-    if collection.count() > 0:
-        return collection
+def _ensure_ingested(conn) -> None:
+    """Populates policy_chunks on first-ever run (persists in Postgres from then on --
+    unlike the old in-memory Chroma collection, this survives across MCP subprocess
+    restarts, only re-embedding if the table is genuinely empty)."""
+    if not store.is_empty(conn):
+        return
 
     all_chunks = [chunk for path in sorted(DOCS_DIR.glob("*.md")) for chunk in _chunk_doc(path)]
-    collection.add(
-        ids=[f"{c['doc_name']}_{c['chunk_index']}" for c in all_chunks],
-        documents=[c["content"] for c in all_chunks],
-        metadatas=[
-            {"doc_name": c["doc_name"], "chunk_index": c["chunk_index"], "heading": c["heading"]}
-            for c in all_chunks
-        ],
-    )
-    return collection
+    embeddings = _embedder.encode([c["content"] for c in all_chunks], normalize_embeddings=True)
+    store.ingest(conn, all_chunks, embeddings)
 
 
-_collection = _build_collection()
+_conn = store.connect()
+_ensure_ingested(_conn)
 
 
 def retrieve(query: str, top_k: int = TOP_K, min_similarity: float = MIN_SIMILARITY) -> list[dict]:
-    results = _collection.query(query_texts=[query], n_results=top_k)
-
-    all_chunks = []
-    for doc, meta, dist in zip(
-        results["documents"][0], results["metadatas"][0], results["distances"][0]
-    ):
-        all_chunks.append({
-            "doc_name": meta["doc_name"],
-            "chunk_index": meta["chunk_index"],
-            "heading": meta["heading"],
-            "content": doc,
-            "similarity": round(1 - dist, 4),
-        })
+    query_embedding = _embedder.encode(query, normalize_embeddings=True)
+    all_chunks = store.search(_conn, query_embedding, top_k)
 
     chunks = [c for c in all_chunks if c["similarity"] >= min_similarity]
     dropped = [c for c in all_chunks if c["similarity"] < min_similarity]

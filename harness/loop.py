@@ -12,8 +12,9 @@ import uuid
 
 from langfuse import get_client, propagate_attributes
 
-from harness import llm_client, permissions, prompts, schema
-from memory.store import format_prior_tickets, get_ticket_history
+from harness import permissions, prompts, schema
+from harness.llm_provider import get_llm_client
+from memory.store import format_prior_tickets, get_customer_history
 
 CLASSIFY_TOOL = {
     "name": "classify",
@@ -51,23 +52,22 @@ REJECTED_ACTION_MESSAGE = (
 )
 
 
-def new_session(customer_id: str, account: dict) -> dict:
+async def new_session(customer_id: str, account: dict) -> dict:
     return {
         "session_id": str(uuid.uuid4()),
         "customer_id": customer_id,
         "account": account,
         "short_term_buffer": [],
+        "conversation_summary_xml": "",
         "closure_reason": None,
-        "prior_tickets": get_ticket_history(customer_id),
+        "prior_tickets": await get_customer_history(customer_id),
     }
 
 
 def _classify(session: dict, langfuse) -> list[str]:
-    with langfuse.start_as_current_observation(
-        name="classify-intent", as_type="generation", model=llm_client.PRIMARY_MODEL
-    ) as gen:
+    with langfuse.start_as_current_observation(name="classify-intent", as_type="generation") as gen:
         gen.update(input=session["short_term_buffer"][-1]["content"])
-        response = llm_client.complete(
+        response = get_llm_client().create(
             system=prompts.CLASSIFY_SYSTEM_PROMPT,
             messages=session["short_term_buffer"],
             tools=[CLASSIFY_TOOL],
@@ -77,6 +77,7 @@ def _classify(session: dict, langfuse) -> list[str]:
         gen.update(
             output=categories,
             model=response.model,
+            metadata={"provider": response.provider},
             usage_details={
                 "input": response.input_tokens,
                 "output": response.output_tokens,
@@ -95,11 +96,9 @@ def _decide(session: dict, category: str, langfuse) -> dict:
         f"Account standing: {account['standing']}\n"
         f"{format_prior_tickets(session['prior_tickets'])}"
     )
-    with langfuse.start_as_current_observation(
-        name="decide-action", as_type="generation", model=llm_client.PRIMARY_MODEL
-    ) as gen:
+    with langfuse.start_as_current_observation(name="decide-action", as_type="generation") as gen:
         gen.update(input=session["short_term_buffer"][-1]["content"])
-        response = llm_client.complete(
+        response = get_llm_client().create(
             system=system,
             messages=session["short_term_buffer"],
             tools=[DECIDE_TOOL],
@@ -109,6 +108,7 @@ def _decide(session: dict, category: str, langfuse) -> dict:
         gen.update(
             output=action,
             model=response.model,
+            metadata={"provider": response.provider},
             usage_details={
                 "input": response.input_tokens,
                 "output": response.output_tokens,

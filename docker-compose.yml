@@ -1,0 +1,30 @@
+# Local Postgres for development only -- production points DATABASE_URL at AWS
+# RDS instead (log/DECISIONS.md roadmap: SQLite -> Postgres -> RDS). Nothing in
+# the app code knows or cares which one it's talking to.
+#
+# pgvector/pgvector:pg16 (not plain postgres:16-alpine) -- same Postgres 16, plus the
+# pgvector extension pre-built, so RAG's policy_chunks table (rag/store.py) lives in
+# this same instance instead of a separate ChromaDB process. See log/DECISIONS.md.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dubba
+      POSTGRES_PASSWORD: dubba
+      POSTGRES_DB: dubba
+    ports:
+      # Host 5432 is taken by a pre-existing native Postgres 18 install on this
+      # machine -- mapped to 5433 on the host side instead. Container-internal port
+      # stays 5432 (irrelevant to anything outside the container).
+      - "5433:5432"
+    volumes:
+      - dubba_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dubba -d dubba"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  dubba_pgdata:

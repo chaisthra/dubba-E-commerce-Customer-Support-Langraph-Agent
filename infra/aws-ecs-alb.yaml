@@ -1,0 +1,256 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Assignment 2, section 2.6 -- part 2 of 2. ALB + ECS Fargate service running the
+  agent, plus Application Auto Scaling (section 2.6.3). Deploy AFTER
+  infra/aws-network-rds-ecr.yaml (part 1) -- this needs a REAL image already
+  pushed to the ECR repo part 1 creates (ECS won't report healthy pointed at a
+  placeholder, and there's no clean way to make the stack wait for an image that
+  doesn't exist yet), and needs part 1's RDSSecurityGroupId output to actually
+  grant this stack's ECS task the one DB-access rule RDS's security group starts
+  without. See README.md for the exact deploy sequencing.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: >
+      At least 2, different AZs -- the VPC's existing public subnets (same ones
+      infra/langfuse-ec2.yaml could use). Both the ALB and the ECS task itself go
+      here -- section 2.6 decision: public subnet + security-group-locked-to-the-
+      ALB instead of a private subnet + NAT Gateway, to avoid ~$32-45/month in
+      NAT Gateway cost for a teaching deployment. The task is NOT directly
+      reachable despite having a public IP -- see DubbaTaskSecurityGroup below.
+  RDSSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: From infra/aws-network-rds-ecr.yaml's RDSSecurityGroupId output -- this stack adds the one ingress rule that lets the ECS task actually reach RDS.
+  ECRImageUri:
+    Type: String
+    Description: >
+      Full image URI including tag, e.g. <account>.dkr.ecr.<region>.amazonaws.com/dubba:bootstrap
+      -- must already exist in ECR (part 1's repo) before this stack deploys.
+      .github/workflows/ci-cd.yml's deploy job replaces this with real,
+      SHA-tagged images on every push once the pipeline is live; this parameter
+      only matters for this stack's FIRST deploy.
+  MinTaskCount:
+    Type: Number
+    Default: 1
+  MaxTaskCount:
+    Type: Number
+    Default: 4
+  CPUTargetValue:
+    Type: Number
+    Default: 60
+    Description: Target-tracking CPU utilization percent -- see README.md's Defensible justification for why this number.
+
+Resources:
+  # --- ALB, public, deliberately -- the one thing in this whole stack meant to
+  # be internet-reachable. ---
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: dubba ALB -- inbound 80 from the internet, this is the intended public entry point.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Public HTTP -- the stable URL a reviewer/client hits.
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: dubba-alb
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups: [!Ref ALBSecurityGroup]
+      Subnets: !Ref PublicSubnetIds
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: dubba-tg
+      TargetType: ip  # required for Fargate -- tasks don't have a fixed ENI to register by instance ID
+      Port: 8000
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # --- ECS task -- reachable ONLY via the ALB's security group, never directly,
+  # despite sitting in a public subnet with a public IP. Section 7.5's own
+  # explicit guidance: "only the ALB's security group, not the open internet,
+  # can reach the task directly." ---
+  DubbaTaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: dubba ECS task -- inbound 8000 ONLY from the ALB's security group, nothing else, despite the task itself sitting in a public subnet.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: Only the ALB can reach the task directly -- not 0.0.0.0/0, not even a specific IP.
+
+  RDSIngressFromTask:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref RDSSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref DubbaTaskSecurityGroup
+      Description: The one thing allowed to reach RDS -- the ECS task's own security group, added here since it doesn't exist until this stack does.
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: dubba-cluster
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/dubba
+      RetentionInDays: 7  # teaching deployment, torn down after use -- no need for longer retention
+
+  # Execution role: what the ECS AGENT itself uses to pull the image, write
+  # logs, and inject secrets from SSM into the container's environment (the
+  # `secrets` field below, NOT plain `environment` -- so credential values never
+  # end up baked into the task definition JSON in plaintext). No separate task
+  # role -- the app itself never calls an AWS API directly (no boto3 anywhere in
+  # this codebase), so there's nothing for a task role to grant.
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: dubba-ecs-execution-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: dubba-ssm-secrets-read
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameters  # plural -- the actual permission the ECS agent needs for task-definition `secrets`, distinct from ssm:GetParameter (singular) used elsewhere in this repo's own scripts
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/dubba/*"
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: "*"
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: dubba-task
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "1024"
+      Memory: "3072"
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: dubba
+          Image: !Ref ECRImageUri
+          PortMappings:
+            - ContainerPort: 8000
+          Secrets:
+            - Name: ANTHROPIC_API_KEY
+              ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/dubba/anthropic-api-key"
+            - Name: GROQ_API_KEY
+              ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/dubba/groq-api-key"
+            - Name: DATABASE_URL
+              ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/dubba/database-url"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: dubba
+
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      ServiceName: dubba-service
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref MinTaskCount
+      LaunchType: FARGATE
+      # 120s -- generous on purpose. rag/retriever.py loads sentence-transformers
+      # on first import inside the MCP subprocess; a container's first cold start
+      # (model weights not yet cached) is slower than a warmed-up local process,
+      # and a health-check failure during that window would kill a perfectly
+      # good task before it ever got the chance to answer one request.
+      HealthCheckGracePeriodSeconds: 120
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref PublicSubnetIds
+          SecurityGroups: [!Ref DubbaTaskSecurityGroup]
+          AssignPublicIp: ENABLED
+      LoadBalancers:
+        - ContainerName: dubba
+          ContainerPort: 8000
+          TargetGroupArn: !Ref TargetGroup
+
+  # --- Autoscaling, section 2.6.3. CPU-based target tracking -- straightforward
+  # to demo (a CPU-bound loop hitting the ALB is enough to trigger a real
+  # scale-out, per the assignment's own suggested demo method) and a defensible
+  # first choice over ALB-request-count for an LLM-bound workload where request
+  # LATENCY (spent waiting on Anthropic/Groq), not raw request volume, is what
+  # actually strains a task. ---
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ResourceId: !Sub "service/${ECSCluster}/${ECSService.Name}"
+      ScalableDimension: ecs:service:DesiredCount
+      MinCapacity: !Ref MinTaskCount
+      MaxCapacity: !Ref MaxTaskCount
+      # RoleARN deliberately omitted -- Application Auto Scaling creates/uses its
+      # own service-linked role automatically now; hardcoding the ARN is a
+      # legacy pattern that can fail outright if this account has never set up
+      # ECS service autoscaling before (the role wouldn't exist yet to reference).
+
+  ScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: dubba-cpu-target-tracking
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: !Ref CPUTargetValue
+        ScaleOutCooldown: 60
+        ScaleInCooldown: 120  # slower to scale back in than out -- avoid flapping right after a real scale-out event
+
+Outputs:
+  ALBDNSName:
+    Description: The stable URL -- http://<this>/chat, /auth, /health
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+  ECSClusterName:
+    Value: !Ref ECSCluster
+  ECSServiceName:
+    Value: !GetAtt ECSService.Name
+  ECSTaskFamily:
+    Value: !Ref TaskDefinition
+  ContainerName:
+    Value: dubba

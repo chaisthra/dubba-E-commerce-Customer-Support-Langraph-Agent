@@ -3,5 +3,10 @@ langfuse
 python-dotenv
 mcp[cli]
 langgraph
-chromadb
 sentence-transformers
+langgraph-checkpoint-postgres
+psycopg[binary,pool]
+groq
+pgvector
+fastapi
+uvicorn[standard]

@@ -5,9 +5,14 @@ __pycache__/
 venv/
 *.egg-info/
 .DS_Store
-chroma_db/
 memory/*.db
-log/
+# Everything in log/ stays private EXCEPT log/learnings/ -- that one's a real
+# submission deliverable (assignment 2, section 2.2's confident-wrong-path docs)
+# and needs to be visible on GitHub. `log/*` + a negation, not just `!log/learnings/`
+# on its own -- git won't look inside a fully-excluded parent directory to find
+# negation matches, so the parent has to be excluded one level shallow instead.
+log/*
+!log/learnings/
 
 # local Claude Code tooling, not part of the submission
 .agents/

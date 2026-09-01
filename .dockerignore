@@ -1,0 +1,15 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+.env
+log/
+evals/*.json
+.github/
+infra/
+memory/*.db
+.DS_Store
+skills-lock.json
+.agents/
+.claude/

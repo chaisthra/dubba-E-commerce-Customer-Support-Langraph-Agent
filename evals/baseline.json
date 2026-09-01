@@ -1,0 +1,10 @@
+{
+  "combined_score": 71.92,
+  "trajectory_score_pct": 93.33,
+  "trajectory_passed": 14,
+  "trajectory_total": 15,
+  "judge_score_pct": 50.5,
+  "judge_average": 3.02,
+  "judge_runs_per_ticket": 3,
+  "timestamp": "2026-08-28T21:38:10.003016+00:00"
+}

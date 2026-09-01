@@ -1,0 +1,231 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Self-hosted Langfuse (the same 6-container docker-compose stack used locally --
+  postgres, clickhouse, redis, minio, langfuse-web, langfuse-worker) on a single
+  EC2 instance, so CI (GitHub Actions) and any other outside caller has a real,
+  network-reachable Langfuse endpoint instead of localhost. This is auxiliary
+  infrastructure for tracing/observability -- NOT the graded agent deployment
+  itself (that's ECS Fargate + ALB, assignment section 2.6.1, a separate template).
+  Teardown: infra/teardown-langfuse-ec2.sh (one command, deletes this whole stack).
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to launch into. Find yours with `aws ec2 describe-vpcs`.
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Public subnet (needs a route to an internet gateway -- CI has to reach this over the public internet). Find with `aws ec2 describe-subnets`.
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t3.small, t3.medium, t3.large]
+    Description: >
+      t3.medium (4 GiB RAM) is the default, not t3.small (2 GiB) or the
+      absolute-cheapest t3.micro (1 GiB) -- ClickHouse (one of the 6 containers in
+      this stack) genuinely needs headroom beyond 1-2 GiB to start reliably
+      alongside Postgres/Redis/MinIO/web/worker on the same box. Same principle
+      the assignment itself uses for RDS: "smallest instance class that RUNS", not
+      smallest possible. t3.small may work for light use if you want to try it.
+  SSHKeyName:
+    Type: String
+    Default: ""
+    Description: >
+      Optional EC2 key pair name for SSH access. Leave blank (default) to rely on
+      SSM Session Manager instead -- no key pair to manage or leak, and no inbound
+      port 22 needed at all.
+
+Conditions:
+  HasSSHKey: !Not [!Equals [!Ref SSHKeyName, ""]]
+
+Resources:
+  LangfuseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Langfuse EC2 host -- port 3000 open to the internet (CI source IP is dynamic, cannot be scoped tighter without a proxy or VPN), SSH only if a key pair is provided.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 0.0.0.0/0
+          Description: Langfuse web UI + API (langfuse-web) -- what CI and browsers hit.
+        - !If
+          - HasSSHKey
+          - IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+            CidrIp: 0.0.0.0/0
+            Description: SSH (only present because SSHKeyName was set -- otherwise use SSM Session Manager).
+          - !Ref AWS::NoValue
+
+  LangfuseInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore  # Session Manager access, no SSH key needed
+      Policies:
+        - PolicyName: WriteLangfuseInitKeysToSSM
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:GetParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/langfuse-ec2/*"
+                # Scoped to this stack's own parameter prefix only -- the instance
+                # can publish/read its own generated Langfuse project keys, nothing else.
+
+  LangfuseInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref LangfuseInstanceRole]
+
+  LangfuseEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+    # Fixed for the lifetime of this stack -- EC2's default auto-assigned public
+    # IP changes on every stop/start (observed directly: a UserData bugfix
+    # redeploy changed it from 3.108.191.151 to 3.109.184.35 with no instance
+    # replacement), which would silently strand CI pointed at a dead IP, since
+    # /langfuse-ec2/base-url only gets rewritten when UserData actually re-runs
+    # (once per instance ID, not once per boot -- cloud-init caches that state).
+    # An Elastic IP removes the whole failure class: the address CI/humans use
+    # never changes unless this stack is deleted and recreated.
+
+  LangfuseInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!Ref LangfuseSecurityGroup]
+      IamInstanceProfile: !Ref LangfuseInstanceProfile
+      KeyName: !If [HasSSHKey, !Ref SSHKeyName, !Ref AWS::NoValue]
+      ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20  # ClickHouse + Postgres + MinIO data -- 20 GiB is comfortable for a teaching deployment, not production trace volume
+            VolumeType: gp3
+      Tags:
+        - { Key: Name, Value: langfuse-ec2 }
+      # PUBLIC_IP below is resolved to the Elastic IP's actual address at
+      # CFN-template-render time (before this instance even boots), NOT
+      # discovered by querying instance metadata at runtime -- so there is no
+      # race with LangfuseEIPAssociation below actually completing, and no more
+      # need for the IMDSv2 token dance this template used before.
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          exec > >(tee /var/log/langfuse-userdata.log) 2>&1
+
+          dnf install -y docker
+          systemctl enable --now docker
+          usermod -aG docker ec2-user
+
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -fsSL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
+            -o /usr/local/lib/docker/cli-plugins/docker-compose
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+          mkdir -p /opt/langfuse
+          cd /opt/langfuse
+          curl -fsSL -o docker-compose.yml \
+            https://raw.githubusercontent.com/langfuse/langfuse/main/docker-compose.yml
+
+          # Generate every secret fresh at boot -- nothing hardcoded in this
+          # template, nothing to leak by having this file in a repo. Same
+          # headless-init pattern already used for the local self-hosted instance
+          # (see log/DECISIONS.md) -- auto-provisions an org/project/user/API-key
+          # pair on first boot, no web signup click-through needed.
+          SALT=$(openssl rand -hex 32)
+          ENCRYPTION_KEY=$(openssl rand -hex 32)
+          NEXTAUTH_SECRET=$(openssl rand -hex 32)
+          POSTGRES_PASSWORD=$(openssl rand -hex 16)
+          CLICKHOUSE_PASSWORD=$(openssl rand -hex 16)
+          MINIO_ROOT_PASSWORD=$(openssl rand -hex 16)
+          REDIS_AUTH=$(openssl rand -hex 16)
+          INIT_PROJECT_PUBLIC_KEY="pk-lf-$(openssl rand -hex 16)"
+          INIT_PROJECT_SECRET_KEY="sk-lf-$(openssl rand -hex 16)"
+          INIT_USER_PASSWORD=$(openssl rand -hex 12)
+          # The Elastic IP's address, substituted in directly by CloudFormation
+          # at template-render time -- not discovered via instance metadata, so
+          # this needs no IMDS call (and no IMDSv2 token dance) at all, and can't
+          # race LangfuseEIPAssociation actually finishing.
+          PUBLIC_IP="${LangfuseEIP}"
+
+          cat > .env <<EOF
+          SALT=${!SALT}
+          ENCRYPTION_KEY=${!ENCRYPTION_KEY}
+          NEXTAUTH_SECRET=${!NEXTAUTH_SECRET}
+          NEXTAUTH_URL=http://${!PUBLIC_IP}:3000
+          POSTGRES_PASSWORD=${!POSTGRES_PASSWORD}
+          DATABASE_URL=postgresql://postgres:${!POSTGRES_PASSWORD}@postgres:5432/postgres
+          CLICKHOUSE_PASSWORD=${!CLICKHOUSE_PASSWORD}
+          MINIO_ROOT_PASSWORD=${!MINIO_ROOT_PASSWORD}
+          LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY=${!MINIO_ROOT_PASSWORD}
+          LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY=${!MINIO_ROOT_PASSWORD}
+          LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY=${!MINIO_ROOT_PASSWORD}
+          REDIS_AUTH=${!REDIS_AUTH}
+          LANGFUSE_INIT_ORG_ID=ci-org
+          LANGFUSE_INIT_ORG_NAME=CI
+          LANGFUSE_INIT_PROJECT_ID=ci-project
+          LANGFUSE_INIT_PROJECT_NAME=dubba-ci
+          LANGFUSE_INIT_PROJECT_PUBLIC_KEY=${!INIT_PROJECT_PUBLIC_KEY}
+          LANGFUSE_INIT_PROJECT_SECRET_KEY=${!INIT_PROJECT_SECRET_KEY}
+          LANGFUSE_INIT_USER_EMAIL=ci@dubba.local
+          LANGFUSE_INIT_USER_NAME=CI
+          LANGFUSE_INIT_USER_PASSWORD=${!INIT_USER_PASSWORD}
+          EOF
+
+          docker compose up -d
+
+          # Publish everything an outside caller (CI, or a human logging into the
+          # web UI) needs -- as SecureString, readable back with
+          # `aws ssm get-parameter --with-decryption`. web-login-email is fixed
+          # (not a secret) but published anyway so nothing about logging in
+          # requires re-reading this template or SSHing into the instance.
+          aws ssm put-parameter --region ${AWS::Region} --name /langfuse-ec2/base-url \
+            --type String --overwrite --value "http://${!PUBLIC_IP}:3000"
+          aws ssm put-parameter --region ${AWS::Region} --name /langfuse-ec2/public-key \
+            --type SecureString --overwrite --value "${!INIT_PROJECT_PUBLIC_KEY}"
+          aws ssm put-parameter --region ${AWS::Region} --name /langfuse-ec2/secret-key \
+            --type SecureString --overwrite --value "${!INIT_PROJECT_SECRET_KEY}"
+          aws ssm put-parameter --region ${AWS::Region} --name /langfuse-ec2/web-login-email \
+            --type String --overwrite --value "ci@dubba.local"
+          aws ssm put-parameter --region ${AWS::Region} --name /langfuse-ec2/web-login-password \
+            --type SecureString --overwrite --value "${!INIT_USER_PASSWORD}"
+
+  LangfuseEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref LangfuseInstance
+      EIP: !Ref LangfuseEIP
+
+Outputs:
+  PublicIP:
+    Description: Elastic IP -- fixed for this stack's lifetime, LANGFUSE_BASE_URL is http://<this>:3000
+    Value: !Ref LangfuseEIP
+  LangfuseURL:
+    Description: Full Langfuse base URL (stable across any stop/start of the instance)
+    Value: !Sub "http://${LangfuseEIP}:3000"
+  SSMKeyParameters:
+    Description: >
+      Fetch the generated project keys AND web login once the instance has
+      finished booting (a few minutes) with:
+        aws ssm get-parameter --name /langfuse-ec2/public-key --with-decryption --query Parameter.Value --output text
+        aws ssm get-parameter --name /langfuse-ec2/secret-key --with-decryption --query Parameter.Value --output text
+        aws ssm get-parameter --name /langfuse-ec2/web-login-email --query Parameter.Value --output text
+        aws ssm get-parameter --name /langfuse-ec2/web-login-password --with-decryption --query Parameter.Value --output text
+      CI reads public-key/secret-key/base-url directly from SSM at runtime
+      (.github/workflows/ci-cd.yml), not as GitHub Secrets -- see
+      infra/push-secrets-to-ssm.sh for the LLM provider keys' equivalent.
+    Value: "/langfuse-ec2/public-key, /langfuse-ec2/secret-key, /langfuse-ec2/base-url, /langfuse-ec2/web-login-email, /langfuse-ec2/web-login-password"

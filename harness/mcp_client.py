@@ -5,6 +5,7 @@ whole process lifetime -- not spun up per turn.
 """
 
 import json
+import os
 import sys
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -25,6 +26,11 @@ class MCPClient:
             command=sys.executable,
             args=["-m", "mcp_server.server"],
             cwd=str(PROJECT_ROOT),
+            # The stdio transport only inherits a minimal env allowlist by default
+            # (HOME/LOGNAME/PATH/SHELL/TERM/USER) -- rag/store.py needs DATABASE_URL
+            # to reach the pgvector-backed policy_chunks table, so it's added
+            # explicitly here rather than the subprocess silently having no DB access.
+            env={"DATABASE_URL": os.environ["DATABASE_URL"]},
         )
         read, write = await self._stack.enter_async_context(stdio_client(params))
         self._session = await self._stack.enter_async_context(ClientSession(read, write))
