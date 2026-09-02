@@ -1,0 +1,249 @@
+{
+  "score": 0.9333333333333333,
+  "passed": 14,
+  "total": 15,
+  "results": [
+    {
+      "id": "refund_policy_ord1001",
+      "query": "what is the refund policy for order 1001",
+      "expected_trajectory": [
+        "lookup_order",
+        "search_policy"
+      ],
+      "actual_trajectory": [
+        "lookup_order",
+        "search_policy"
+      ],
+      "missing": [],
+      "extra": [],
+      "passed": true,
+      "reply": "Hi there!\n\nI've looked up your order **ORD1001**, which was delivered on **August 24, 2026**. You're well within the refund window \u2014 you have **10 days remaining** to submit a refund request (our policy allows refunds within 15 days of delivery).\n\nYour order included:\n- Mona Lisa's Smirk (Vanilla Musk)\n- Starry Night Swirl (Lavender Dusk)\n\nIf you'd like to proceed with a refund, please email us at **dubba.support@dubba.com** with your order number and let us know which item(s) you'd like to return and the reason. We'll get that sorted for you right away!\n\nLet me know if you need anything else. \ud83d\udd6f\ufe0f",
+      "error": null
+    },
+    {
+      "id": "not_delivered_20_days",
+      "query": "what should i do when my order isnt delivered after 20 days of placing order?",
+      "expected_trajectory": [
+        "lookup_order",
+        "search_policy"
+      ],
+      "actual_trajectory": [
+        "lookup_order",
+        "search_policy"
+      ],
+      "missing": [],
+      "extra": [],
+      "passed": true,
+      "reply": "I'm sorry your order hasn't arrived yet \u2014 I can see that your order ORD1003 for Versailles Vanity (Rose Gold Amber) was placed on August 7th and shipped on August 9th, but it's now been 20 days in transit without delivery.\n\n**Here's what applies:**\n\nSince your order has been in transit for more than 8 days after shipping (our domestic delay threshold), you're automatically eligible for **$4 USD shipping delay compensation**. This will be issued either as a credit to your Dubba account or refunded to your original payment method \u2014 whichever you prefer. You don't need to submit a separate claim for this; it's triggered automatically once the delay is detected.\n\n**Regarding the order itself:**\n\nYou're also separately eligible to pursue a non-delivery refund if the order continues not to arrive. However, our policy documents don't specify the exact next steps for initiating that refund or what \"reasonable additional period\" means in practice after 20 days.\n\n**What to do now:**\n\nPlease email **dubba.support@dubba.com** with your order number (ORD1003). They'll help you with both the delay compensation payout preference and guide you through the non-delivery refund process, including any carrier verification that might be needed.\n\nI wish I could give you more specific steps here, but I want to make sure you get accurate information directly from the team who can action this for you right away.",
+      "error": null
+    },
+    {
+      "id": "membership_cancel_cost",
+      "query": "what is the membership cost if a member cancels their account",
+      "expected_trajectory": [
+        "search_policy"
+      ],
+      "actual_trajectory": [
+        "search_policy"
+      ],
+      "missing": [],
+      "extra": [],
+      "passed": true,
+      "reply": "I don't see anything in our policies about membership costs or cancellation fees. This isn't something I have information on.\n\nFor questions about membership pricing or what happens when you cancel your account, please reach out to our team directly at dubba.support@dubba.com \u2013 they'll be able to give you the specific details you need.",
+      "error": null
+    },
+    {
+      "id": "international_shipping_pricing",
+      "query": "what is the pricing for international shipment",
+      "expected_trajectory": [
+        "search_policy"
+      ],
+      "actual_trajectory": [
+        "search_policy"
+      ],
+      "missing": [],
+      "extra": [],
+      "passed": true,
+      "reply": "For international orders, we charge a flat shipping fee of **$5 USD per order** \u2014 no matter how many candles you're ordering or which country you're in. So whether you're getting one candle or several, you'll only pay that $5 shipping fee once for the whole order.\n\nFor example, if you order a single $35 candle, your total would be $40 USD ($35 for the candle + $5 shipping). Everything is charged in USD.\n\nIf you have any other questions about your order, just let me know!",
+      "error": null
+    },
+    {
+      "id": "where_is_ord1001",
+      "query": "where is my order 1001",
+      "expected_trajectory": [
+        "lookup_order"
+      ],
+      "actual_trajectory": [
+        "lookup_order"
+      ],
+      "missing": [],
+      "extra": [],
+      "passed": true,
+      "reply": "Your order ORD1001 was delivered on August 24, 2026! It included your Mona Lisa's Smirk (Vanilla Musk) and Starry Night Swirl (Lavender Dusk) candles.\n\nIf you haven't received it or there's an issue with the delivery, please let me know and I'll be happy to help sort it out.",
+      "error": null
+    },
+    {
+      "id": "most_recent_order_status",
+      "query": "can you tell me the status of my most recent order",
+      "expected_trajectory": [
+        "lookup_order"
+      ],
+      "actual_trajectory": [
+        "lookup_order"
+      ],
+      "missing": [],
+      "extra": [],
+      "passed": true,
+      "reply": "Hi there!\n\nYour most recent order (ORD1008) is currently **in transit** and on its way to you. It was shipped on August 26th, so it's been 3 days in transit. Everything is moving along smoothly \u2014 your Starry Night Swirl (Lavender Dusk) and Mona Lisa's Smirk (Vanilla Musk) candles should arrive soon!\n\nIf you have any other questions or if anything comes up, feel free to reach out to us at dubba.support@dubba.com.",
+      "error": null
+    },
+    {
+      "id": "delivery_taking_forever",
+      "query": "my order hasn't arrived yet and it's taking forever",
+      "expected_trajectory": [
+        "lookup_order",
+        "search_policy"
+      ],
+      "actual_trajectory": [
+        "lookup_order"
+      ],
+      "missing": [
+        "search_policy"
+      ],
+      "extra": [],
+      "passed": false,
+      "reply": "I've checked your order (ORD1001), and I can see it was actually delivered on August 24th, 2026 \u2014 just 2 days after it shipped on August 22nd. The tracking shows it as completed.\n\nIf you haven't received your candles (Mona Lisa's Smirk and Starry Night Swirl), a few things might have happened:\n\n- **Package left in an unexpected spot** \u2014 sometimes carriers leave packages by a side door, with a building manager, or with a neighbor\n- **Stolen after delivery** \u2014 unfortunately this does happen\n- **Delivered to wrong address** \u2014 less common but possible\n\n**What to do next:**\n1. Check around your delivery location and with neighbors if you haven't already\n2. If you still can't locate it, email us at **dubba.support@dubba.com** with your order number (ORD1001) and let us know the package never arrived despite showing delivered \u2014 we'll help sort this out\n\nYou're still within the 30-day window to address delivery issues, so we've got time to make this right!",
+      "error": null
+    },
+    {
+      "id": "lit_candle_return_denied",
+      "query": "i already lit the candle but now i want to return it, can i get a refund",
+      "expected_trajectory": [
+        "lookup_order",
+        "search_policy"
+      ],
+      "actual_trajectory": [
+        "lookup_order",
+        "search_policy"
+      ],
+      "missing": [],
+      "extra": [],
+      "passed": true,
+      "reply": "I appreciate you reaching out! I can see your order (ORD1001) with Mona Lisa's Smirk and Starry Night Swirl was delivered on August 24th, and you're still within the refund window \u2014 you have 10 days left to request a return.\n\nHowever, I don't have specific information in our policies about whether candles that have already been lit are eligible for refunds. This is something I genuinely can't confirm for you based on what I have access to.\n\nPlease reach out directly to **dubba.support@dubba.com** \u2014 the team there will be able to review your situation and let you know what options are available for a candle that's been used. They'll get back to you quickly and help sort this out!",
+      "error": null
+    },
+    {
+      "id": "refund_flagged_account",
+      "query": "i want a refund for order 1004, is my account okay to process this",
+      "expected_trajectory": [
+        "lookup_order",
+        "search_policy"
+      ],
+      "actual_trajectory": [
+        "lookup_order",
+        "search_policy"
+      ],
+      "missing": [],
+      "extra": [],
+      "passed": true,
+      "reply": "I can see your order ORD1004 for the Girl with a Pearl Earring candle was delivered on August 23rd, and you're still within the 14-day refund window (9 days remaining). However, your account is currently flagged, which means we can't process a refund right now.\n\nAccording to our refund policy, your account needs to be active and in good standing for us to move forward with any refund request. Even though your order otherwise qualifies, the account flag puts a hold on refund processing until that's resolved.\n\nPlease reach out to dubba.support@dubba.com so our team can help you sort out the account status. Once that's cleared up, we'll be able to process your refund request.",
+      "error": null
+    },
+    {
+      "id": "refund_window_closed",
+      "query": "can i still get a refund for order 1007, it was delivered 16 days ago",
+      "expected_trajectory": [
+        "lookup_order",
+        "search_policy"
+      ],
+      "actual_trajectory": [
+        "lookup_order",
+        "search_policy"
+      ],
+      "missing": [],
+      "extra": [],
+      "passed": true,
+      "reply": "I'm sorry, but order ORD1007 isn't eligible for a refund anymore. It was delivered on August 13, 2026, which puts you 16 days past delivery \u2014 just one day outside our 15-day refund window.\n\nOur refund policy (section 01_refund_policy) requires requests to be submitted within 15 days of the delivery date recorded by the carrier. Since that window has closed, this would need manual review by a support specialist, and I can't guarantee approval from here.\n\nPlease reach out to **dubba.support@dubba.com** with your order number (ORD1007) and explain your situation \u2014 they'll be able to look at your case individually and see what options might be available.",
+      "error": null
+    },
+    {
+      "id": "cancel_subscription_howto",
+      "query": "how do i cancel my candle subscription",
+      "expected_trajectory": [
+        "search_policy"
+      ],
+      "actual_trajectory": [
+        "search_policy",
+        "search_policy",
+        "search_policy"
+      ],
+      "missing": [],
+      "extra": [],
+      "passed": true,
+      "reply": "I wasn't able to fully resolve this after checking the information available to me, so I'm creating a support ticket for you now. One of our team will reach out shortly from dubba.support@dubba.com -- you'll get the full details by email.",
+      "error": null
+    },
+    {
+      "id": "suspended_account_appeal",
+      "query": "why is my account suspended and how do i appeal",
+      "expected_trajectory": [
+        "search_policy"
+      ],
+      "actual_trajectory": [
+        "search_policy"
+      ],
+      "missing": [],
+      "extra": [],
+      "passed": true,
+      "reply": "I'm sorry to hear your account has been suspended. Here's what I can tell you about suspensions and the appeal process:\n\n**Why accounts get suspended:**\nAccounts are typically suspended for one of these reasons:\n- Repeated failed payment attempts (indicating a payment method issue or potential fraud)\n- Suspected fraudulent activity (such as unusual order patterns, disputed chargebacks, or mismatched billing/shipping information flagged by the payment processor)\n- Violation of Dubba's terms of service (such as abuse of the return policy or abusive behavior toward support staff)\n\n**How to appeal:**\nYou can submit a written appeal through support within **30 days** of your suspension date. In your appeal, please include:\n- An explanation of the circumstances\n- Any supporting evidence that's relevant (for example, proof of a legitimate payment method or explanation of your order pattern)\n\nIf your appeal is approved, your account will be reinstated immediately with full ordering privileges. If it's denied, that decision is final for this specific suspension event.\n\nTo submit your appeal or get more specific information about why your account was suspended, please email **dubba.support@dubba.com** \u2014 they'll be able to review your account details and help you through the process.",
+      "error": null
+    },
+    {
+      "id": "broken_candle_refund_ord1001",
+      "query": "My candle arrived with the wick broken, I want a refund order id ORD1001",
+      "expected_trajectory": [
+        "lookup_order",
+        "search_policy"
+      ],
+      "actual_trajectory": [
+        "lookup_order",
+        "search_policy"
+      ],
+      "missing": [],
+      "extra": [],
+      "passed": true,
+      "reply": "I'm sorry your candle arrived damaged! I can see your order ORD1001 was delivered on August 24th, and you're well within our 14-day refund window.\n\nAccording to our damaged-in-transit policy, a broken wick absolutely qualifies for a full refund. To process this for you, I'll need you to send photo evidence showing:\n- The broken wick clearly visible\n- If possible, the shipping packaging it arrived in (this helps us confirm it was transit damage)\n\nOnce you send those photos to dubba.support@dubba.com with your order number ORD1001, our team will process your full refund right away.\n\nAgain, really sorry this happened \u2013 we'll get this sorted out for you quickly!",
+      "error": null
+    },
+    {
+      "id": "customs_duties_honest_gap",
+      "query": "do i need to pay customs duties if i return this from outside india",
+      "expected_trajectory": [
+        "search_policy"
+      ],
+      "actual_trajectory": [
+        "search_policy"
+      ],
+      "missing": [],
+      "extra": [],
+      "passed": true,
+      "reply": "I don't have information in our policies about customs duties or import fees for international returns to India. This isn't something covered in the resources I can access.\n\nFor questions about customs duties, import fees, or the process for returning an order from outside India, please reach out directly to dubba.support@dubba.com \u2013 they'll be able to give you specific guidance based on your location and situation.",
+      "error": null
+    },
+    {
+      "id": "cancelled_order_status",
+      "query": "what's the status of order 1005",
+      "expected_trajectory": [
+        "lookup_order"
+      ],
+      "actual_trajectory": [
+        "lookup_order"
+      ],
+      "missing": [],
+      "extra": [],
+      "passed": true,
+      "reply": "Your order ORD1005 for Venus on the Half Shell (Coconut Sandalwood) was cancelled on August 14, 2026. Since it was cancelled, it was never shipped or delivered.\n\nIf you didn't request this cancellation or have questions about what happened, please reach out to us at dubba.support@dubba.com and we'll look into it for you.",
+      "error": null
+    }
+  ]
+}

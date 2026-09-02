@@ -20,6 +20,7 @@ load_dotenv()
 
 from harness import auth, loop  # noqa: E402  (must follow load_dotenv())
 from harness.mcp_client import MCPClient  # noqa: E402
+from memory.checkpointer import PostgresCheckpointer  # noqa: E402
 from memory.store import save_ticket_summary  # noqa: E402
 
 EXIT_COMMANDS = {"exit", "quit", "bye"}
@@ -73,6 +74,10 @@ async def run_graph_mode(session: dict) -> None:
     await mcp_client.start()
     graph.set_mcp_client(mcp_client)
 
+    checkpointer = PostgresCheckpointer()
+    await checkpointer.start()
+    graph.init_graph(checkpointer.saver)
+
     try:
         while True:
             user_message = input("\nYou: ").strip()
@@ -86,6 +91,7 @@ async def run_graph_mode(session: dict) -> None:
             print(f"\nDubba: {reply}")
     finally:
         await mcp_client.close()
+        await checkpointer.close()
 
 
 async def main() -> None:
@@ -98,7 +104,7 @@ async def main() -> None:
         return
 
     print(f"\nWelcome back, {account['email']}. How can I help with your order today?")
-    session = loop.new_session(account["customer_id"], account)
+    session = await loop.new_session(account["customer_id"], account)
 
     try:
         if args.mode == "loop":
@@ -113,8 +119,8 @@ async def main() -> None:
         print("\n\nDubba: Session ended -- your ticket has been saved as unresolved. Take care!")
 
     if session["short_term_buffer"]:
-        save_ticket_summary(session)
-        print(f"(saved to memory/long_term_memory.db, closure_reason={session['closure_reason']!r})")
+        await save_ticket_summary(session)
+        print(f"(saved to Postgres `tickets` table, closure_reason={session['closure_reason']!r})")
 
 
 if __name__ == "__main__":

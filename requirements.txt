@@ -1,7 +1,12 @@
-anthropic
+anthropic>=1.3.0,<2.0.0
 langfuse
 python-dotenv
 mcp[cli]
 langgraph
-chromadb
 sentence-transformers
+langgraph-checkpoint-postgres
+psycopg[binary,pool]
+groq
+pgvector
+fastapi
+uvicorn[standard]
