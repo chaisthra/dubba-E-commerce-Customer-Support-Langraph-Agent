@@ -141,6 +141,11 @@ class TicketState(TypedDict):
 CLASSIFY_TOOL = {
     "name": "classify",
     "description": "Return every ticket category the customer's message touches.",
+    # strict=true + additionalProperties=false -- see the identical comment on
+    # _ALL_PROPOSE_TOOLS below for why every tool definition in this file has
+    # this now, not just the ones directly implicated in the incident that
+    # found the gap.
+    "strict": True,
     "input_schema": {
         "type": "object",
         "properties": {
@@ -151,6 +156,7 @@ CLASSIFY_TOOL = {
             }
         },
         "required": ["categories"],
+        "additionalProperties": False,
     },
 }
 
@@ -164,41 +170,60 @@ CLASSIFY_TOOL = {
 # .github/workflows/ci-cd.yml and README.md for how this gets toggled in CI.
 AGENT_REGRESSED = os.environ.get("AGENT_REGRESSED", "").lower() == "true"
 
+# strict=true + additionalProperties=false on every tool below (and on
+# CLASSIFY_TOOL/EVALUATE_TOOL) -- 2026-09-02, added after a real, confirmed
+# incident: without it, Anthropic's tool_choice={"type": "any"} (propose_node's
+# mode) does NOT guarantee the model only selects from the tools actually
+# offered -- confirmed live, `AGENT_REGRESSED=true` correctly excluded
+# lookup_order from PROPOSE_TOOLS, and Anthropic (claude-sonnet-4-5, no retry,
+# not Groq) still returned a tool_use block named 'lookup_order' anyway.
+# Anthropic's own docs confirm this is expected, not a bug: strict tool use
+# ("Set strict: true on your tool definitions... guarantees... tool name is
+# always valid, from provided tools") is the actual opt-in for the guarantee
+# this whole harness had been assuming was automatic. See log/DECISIONS.md.
 _ALL_PROPOSE_TOOLS = [
     {
         "name": "respond",
         "description": "Give a final answer for this category using only real information you already have.",
+        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {"message": {"type": "string"}},
             "required": ["message"],
+            "additionalProperties": False,
         },
     },
     {
         "name": "ask_clarification",
         "description": "Ask the customer something essential you're missing that a tool call can't resolve.",
+        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {"message": {"type": "string"}},
             "required": ["message"],
+            "additionalProperties": False,
         },
     },
     {
         "name": "lookup_order",
         "description": "Look up a single order's status, items, and delivery date.",
+        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {"order_id": {"type": "string"}},
             "required": ["order_id"],
+            "additionalProperties": False,
         },
     },
     {
         "name": "check_account_status",
         "description": "Look up an account's standing and order history.",
+        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {"customer_id": {"type": "string"}},
             "required": ["customer_id"],
+            "additionalProperties": False,
         },
     },
     {
@@ -208,10 +233,12 @@ _ALL_PROPOSE_TOOLS = [
             "shipping delay compensation, pricing/shipping, account suspension "
             "appeals, subscription cancellation) for chunks relevant to a question."
         ),
+        "strict": True,
         "input_schema": {
             "type": "object",
             "properties": {"query": {"type": "string"}},
             "required": ["query"],
+            "additionalProperties": False,
         },
     },
 ]
@@ -232,6 +259,7 @@ print(
 EVALUATE_TOOL = {
     "name": "evaluate",
     "description": "Judge whether the data gathered so far is sufficient to answer the customer.",
+    "strict": True,
     "input_schema": {
         "type": "object",
         # reasoning BEFORE sufficient, deliberately -- tool-call fields generate in
@@ -245,6 +273,7 @@ EVALUATE_TOOL = {
             "sufficient": {"type": "boolean"},
         },
         "required": ["reasoning", "sufficient"],
+        "additionalProperties": False,
     },
 }
 
