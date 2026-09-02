@@ -119,7 +119,7 @@ jobs:
       - name: Run regression eval gate
         env:
           DATABASE_URL: postgresql://dubba:dubba@localhost:5433/dubba
-          AGENT_REGRESSED: "true"
+          AGENT_REGRESSED: ${{ inputs.agent_regressed || 'false' }}
         run: python evals/combined_score.py --gate
 
   # ---------------------------------------------------------------
