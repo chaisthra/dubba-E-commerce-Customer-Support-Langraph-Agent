@@ -29,6 +29,11 @@ HOME_COUNTRY = "India"
 DELAY_THRESHOLD_DOMESTIC_DAYS = 8
 DELAY_THRESHOLD_INTERNATIONAL_DAYS = 10
 REFUND_WINDOW_DAYS = 15  # rag/policy_docs/01_refund_policy.md: 15 days from delivery
+# Flat per-candle price -- every product here is the same physical item (a poured
+# candle) at a different scent/design, no real price tiering exists yet. Assignment
+# 3's refund flow needs a real monetary amount to attach to a refund request; this is
+# the source of it (order_total below), not something the LLM ever states or guesses.
+CANDLE_PRICE_USD = 32.00
 
 
 def _days_ago(n: int) -> str:
@@ -235,11 +240,19 @@ def _with_eligibility_status(order: dict) -> dict:
     return order
 
 
+def _with_order_total(order: dict) -> dict:
+    """order_total from real items x CANDLE_PRICE_USD -- never a value a customer
+    states or the LLM estimates. See CANDLE_PRICE_USD above."""
+    order = dict(order)
+    order["order_total"] = round(len(order["items"]) * CANDLE_PRICE_USD, 2)
+    return order
+
+
 def get_order(order_id: str) -> dict | None:
     order = _ORDERS.get(order_id)
     if order is None:
         return None
-    return _with_eligibility_status(_with_delay_status(order))
+    return _with_order_total(_with_eligibility_status(_with_delay_status(order)))
 
 
 def get_account(customer_id: str) -> dict | None:

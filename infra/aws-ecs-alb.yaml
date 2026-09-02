@@ -24,6 +24,9 @@ Parameters:
   RDSSecurityGroupId:
     Type: AWS::EC2::SecurityGroup::Id
     Description: From infra/aws-network-rds-ecr.yaml's RDSSecurityGroupId output -- this stack adds the one ingress rule that lets the ECS task actually reach RDS.
+  HitlApprovalsTableArn:
+    Type: String
+    Description: From infra/aws-network-rds-ecr.yaml's HitlApprovalsTableArn output -- scopes TaskRole's DynamoDB access.
   ECRImageUri:
     Type: String
     Description: >
@@ -159,6 +162,34 @@ Resources:
                 Action: kms:Decrypt
                 Resource: "*"
 
+  # Distinct from ExecutionRole above -- that one is assumed by the ECS AGENT
+  # (image pull, secrets fetch, log delivery) before the container even starts.
+  # This one is assumed by the RUNNING APPLICATION CODE ITSELF (boto3 calls
+  # inside refunds/approval_gate.py's DynamoDBStore) -- a different trust
+  # boundary, so a different role, not an expanded ExecutionRole.
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: dubba-ecs-task-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: dubba-hitl-dynamodb
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Scan
+                Resource: !Ref HitlApprovalsTableArn
+
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -168,11 +199,17 @@ Resources:
       Cpu: "1024"
       Memory: "3072"
       ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
       ContainerDefinitions:
         - Name: dubba
           Image: !Ref ECRImageUri
           PortMappings:
             - ContainerPort: 8000
+          Environment:
+            - Name: HITL_STORE_BACKEND
+              Value: dynamodb
+            - Name: HITL_DYNAMODB_TABLE
+              Value: ordercare-hitl-approvals
           Secrets:
             - Name: ANTHROPIC_API_KEY
               ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/dubba/anthropic-api-key"

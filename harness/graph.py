@@ -52,6 +52,8 @@ prompts instead, the same way account/prior_tickets already are.
 """
 
 import os
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import TypedDict
 
 from langfuse import get_client, propagate_attributes
@@ -62,6 +64,16 @@ from harness.llm_provider import get_llm_client
 from harness.mcp_client import MCPClient
 from harness.summarizer import derive_order_id, summarize_turns
 from memory.store import format_prior_tickets, relevant_prior_summary
+from refunds.approval_gate import get_store
+from refunds.schemas import (
+    ApprovalStatus,
+    PendingAction,
+    RefundDecision,
+    RefundEligibilityResult,
+    RefundOutcome,
+    RefundType,
+    StateSnapshot,
+)
 
 REJECTED_ACTION_MESSAGE = (
     "Sorry, I hit an internal issue handling that part of your request. "
@@ -83,6 +95,24 @@ SESSION_LIMIT_MESSAGE = (
 )
 
 TOOL_CALL_CAP = 3
+
+# Two SLAs, deliberately different, never derived from one another (refund design
+# doc): INTERNAL_SLA_HOURS is how long a reviewer has before a PendingAction goes
+# stale; CUSTOMER_SLA_DAYS is what the customer is actually told, deliberately
+# longer so an expiry-then-escalation still lands inside what was promised.
+REFUND_INTERNAL_SLA_HOURS = 24
+REFUND_CUSTOMER_SLA_DAYS = 2
+
+# Crude, deliberately non-LLM signal for refund_type -- refund_node has no LLM call
+# by design (see refund_node's own docstring), but distinguishing a damaged-item
+# claim from a plain return needs SOME signal beyond order dates (which can only
+# detect non-delivery, never damage). The customer's own words are the only place
+# "damage" is expressed today. A keyword miss just means a real damage claim falls
+# through to the STANDARD path instead of DAMAGED_IN_TRANSIT -- still creates a
+# PendingAction for human review, just without the more permissive window-check
+# exemption DAMAGED_IN_TRANSIT gets. Revisit if this misses real phrasing in
+# practice; see log/loophole.md.
+_DAMAGE_KEYWORDS = ("damage", "damaged", "broken", "shattered", "cracked", "smashed")
 
 # Rolling short-term-memory summarization (log/SESSION_DESIGN.md). TOKEN_CAP is the
 # hard safety net -- if the buffer somehow blows past it before a periodic pass fires
@@ -525,7 +555,174 @@ def evaluate_node(state: TicketState) -> dict:
     return {"sufficient": judgment["sufficient"]}
 
 
+def _find_tool_result(state: TicketState, tool_name: str) -> dict | None:
+    """Most recent result for a given tool THIS TURN, across every category (see
+    module docstring on why turn_tool_results is shared, not per-category). Used
+    instead of a dedicated state["order"] field -- no such field exists; order data
+    only ever lives inside turn_tool_results, same as every other tool result."""
+    for r in reversed(state["turn_tool_results"]):
+        if r["tool"] == tool_name:
+            return r["result"]
+    return None
+
+
+def _refund_ready(state: TicketState) -> bool:
+    """Pure state read, no fetching, no LLM call -- checked FIRST in
+    route_after_evaluate, ahead of the sufficient/cap/propose branches, since
+    refund eligibility is a deterministic computation, not something worth asking
+    evaluate_node's LLM to judge. Checks the CURRENT category only
+    (categories[category_index]), matching every other node's per-category read --
+    NOT membership in the whole categories list, which would wrongly fire while a
+    different category in the same multi-category turn is still being processed."""
+    category = state["categories"][state["category_index"]]
+    if category != "refund_request":
+        return False
+    return _find_tool_result(state, "lookup_order") is not None
+
+
+def _compute_refund_eligibility(state: TicketState, order: dict) -> RefundEligibilityResult:
+    """Deterministic eligibility computation -- no LLM call. Reuses
+    mcp_server/mock_data.py's own refund_window_eligible/account_standing_ok/
+    refund_window_days_remaining (real date/account-standing arithmetic, computed
+    once in get_order()'s pipeline) rather than recomputing any of it here.
+
+    permissions.check_action_permission() already gated the lookup_order call that
+    produced `order` before execute_tool_node ever ran it (see route_after_propose)
+    -- ownership is not re-checked here, trusting that earlier gate rather than
+    re-fetching/re-verifying against the same data a second time."""
+    order_id = order["order_id"]
+    customer_id = state["customer_id"]
+    store = get_store()
+
+    # Duplicate check first -- no point evaluating eligibility on an order that
+    # already has an open refund. Correlates on order_id, never ticket/session id.
+    existing = store.get_active_for_resource(order_id)
+    if existing is not None:
+        return RefundEligibilityResult(
+            outcome=RefundOutcome.DUPLICATE_FOUND,
+            action_id=existing.action_id,
+            customer_message=(
+                f"You already have a refund request on file for order {order_id} "
+                f"(status: {existing.status.value}) -- no need to submit another one. "
+                f"Our team will follow up on the existing request."
+            ),
+            internal_reason=f"active PendingAction {existing.action_id} already exists for order_id={order_id!r}",
+        )
+
+    snapshot = StateSnapshot(
+        order_status=order["status"],
+        shipped_date=order.get("shipped_date"),
+        delivery_date=order.get("delivery_date"),
+        account_standing="active" if order["account_standing_ok"] else "flagged_or_suspended",
+        refund_window_days_remaining=order.get("refund_window_days_remaining"),
+        captured_at=datetime.now(timezone.utc),
+    )
+
+    # Account standing is orthogonal to refund_type -- checked before any
+    # type-specific logic, hard stop either way. No PendingAction created; this is
+    # an automatic deny at the policy boundary, not something a human needs to see
+    # in the review queue.
+    if not order["account_standing_ok"]:
+        return RefundEligibilityResult(
+            outcome=RefundOutcome.ACCOUNT_BLOCKED,
+            customer_message=(
+                "I'm not able to process a refund on this account right now due to its "
+                "current standing. Please reach out to dubba.support@dubba.com so our "
+                "team can look into it directly."
+            ),
+            internal_reason=f"account_standing_ok=False for customer_id={customer_id!r}",
+            snapshot=snapshot,
+        )
+
+    # refund_type BEFORE the window check -- a damaged-in-transit or non-delivery
+    # claim delivered 20 days ago is still eligible; running the window check first
+    # would wrongly auto-reject it. See _DAMAGE_KEYWORDS above for the non-delivery
+    # vs damaged-in-transit vs standard split's real limitation.
+    if order.get("shipped_date") is None or order.get("delivery_date") is None:
+        refund_type = RefundType.NON_DELIVERY
+    elif any(kw in state["user_message"].lower() for kw in _DAMAGE_KEYWORDS):
+        refund_type = RefundType.DAMAGED_IN_TRANSIT
+    else:
+        refund_type = RefundType.STANDARD
+
+    # Window check is a hard stop ONLY for STANDARD refunds -- DAMAGED_IN_TRANSIT and
+    # NON_DELIVERY both still create a PendingAction regardless of window, since
+    # neither is a pure "customer changed their mind" return.
+    if refund_type == RefundType.STANDARD and not order["refund_window_eligible"]:
+        days_remaining = order.get("refund_window_days_remaining")
+        closed_date = (
+            datetime.now(timezone.utc) + timedelta(days=days_remaining)
+        ).date().isoformat() if days_remaining is not None else "an earlier date"
+        return RefundEligibilityResult(
+            outcome=RefundOutcome.WINDOW_CLOSED,
+            refund_type=refund_type,
+            customer_message=(
+                f"I'm sorry, but the refund window for order {order_id} closed on "
+                f"{closed_date}. If there's something specific about this order you'd "
+                f"still like help with, reach out to dubba.support@dubba.com."
+            ),
+            internal_reason=f"refund_window_eligible=False, days_remaining={days_remaining}",
+            snapshot=snapshot,
+        )
+
+    action = PendingAction(
+        action_id=str(uuid.uuid4()),
+        order_id=order_id,
+        customer_id=customer_id,
+        payload=RefundDecision(
+            order_id=order_id,
+            customer_id=customer_id,
+            amount=order["order_total"],
+            reason=state["user_message"],
+        ),
+        status=ApprovalStatus.PENDING,
+        created_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=REFUND_INTERNAL_SLA_HOURS),
+        state_snapshot=snapshot.model_dump(mode="json"),
+    )
+    store.save(action)
+
+    return RefundEligibilityResult(
+        outcome=RefundOutcome.CREATED,
+        action_id=action.action_id,
+        refund_type=refund_type,
+        customer_message=(
+            f"I've logged a refund request for order {order_id} (amount: "
+            f"${action.payload.amount:.2f}) for review -- you'll hear back within "
+            f"{REFUND_CUSTOMER_SLA_DAYS} days."
+        ),
+        internal_reason=f"PendingAction {action.action_id} created, refund_type={refund_type.value}",
+        snapshot=snapshot,
+    )
+
+
+def refund_node(state: TicketState) -> dict:
+    """Deterministic, no LLM call -- the LLM already did its reasoning at
+    propose_node (gathering order/account data via lookup_order/check_account_status);
+    classify_node already determined intent. This node only computes eligibility from
+    data already in state and writes one PendingAction row when human review is
+    actually warranted. customer_message goes out VERBATIM via _advance() -- same
+    mechanism ask_clarification/escalate/reject_tool already use to skip
+    finalize_node's LLM rephrasing -- since this is money-related text a human
+    should be able to trust matches what the eligibility computation actually
+    decided, not an LLM's paraphrase of it."""
+    category = state["categories"][state["category_index"]]
+    order = _find_tool_result(state, "lookup_order")
+    result = _compute_refund_eligibility(state, order)
+
+    langfuse = get_client()
+    with langfuse.start_as_current_observation(name="refund-eligibility", as_type="span") as span:
+        span.update(
+            input={"order_id": order.get("order_id"), "customer_id": state["customer_id"]},
+            output=result.model_dump(mode="json"),
+        )
+
+    return _advance(state, category, result.customer_message)
+
+
 def route_after_evaluate(state: TicketState) -> str:
+    if _refund_ready(state):
+        return "refund"
     if state["sufficient"]:
         return "respond"
     if state["tool_call_count"] >= TOOL_CALL_CAP:
@@ -652,6 +849,7 @@ def build_graph(checkpointer):
     workflow.add_node("execute_tool", execute_tool_node)
     workflow.add_node("evaluate", evaluate_node)
     workflow.add_node("respond", respond_node)
+    workflow.add_node("refund", refund_node)
     workflow.add_node("finalize", finalize_node)
     workflow.add_node("escalate", escalate_node)
     workflow.add_node("reject_tool", reject_tool_node)
@@ -674,10 +872,15 @@ def build_graph(checkpointer):
     workflow.add_conditional_edges(
         "evaluate",
         route_after_evaluate,
-        {"respond": "respond", "propose": "propose", "escalate": "escalate"},
+        {"respond": "respond", "propose": "propose", "escalate": "escalate", "refund": "refund"},
     )
     workflow.add_conditional_edges(
         "respond",
+        route_after_category,
+        {"propose": "propose", "finalize": "finalize", "finalize_turn": "finalize_turn"},
+    )
+    workflow.add_conditional_edges(
+        "refund",
         route_after_category,
         {"propose": "propose", "finalize": "finalize", "finalize_turn": "finalize_turn"},
     )
