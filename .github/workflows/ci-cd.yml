@@ -22,8 +22,18 @@ on:
     # w1a-harness is what PR #1 already targets. Add a branch name here if work
     # moves to a new one later.
     branches: ["w1a-harness", "w2a-deploy"]
-  pull_request:
-    branches: ["w1a-harness"]
+  # Deliberately NO pull_request trigger. PR #1 (w2a-deploy -> w1a-harness) is a
+  # stacked branch pushed to directly, not an independent fork/branch -- its
+  # pull_request:synchronize event fires from the exact same commit the push
+  # event already tested, so a pull_request trigger here would just re-run the
+  # entire 15-ticket trajectory+judge eval suite a second time (real LLM cost,
+  # real minutes) for zero new information. Confirmed live: this doubled
+  # eval-gate's real API spend on every push with no informational benefit, and
+  # separately caused build-and-push/deploy to race each other before that job
+  # got its own push-only guard below (see that comment). Not fully verified:
+  # whether the push-triggered run's result still surfaces on the PR's own
+  # "Checks" page without a pull_request trigger -- if that turns out to
+  # matter, revisit rather than assume.
   workflow_dispatch:
     inputs:
       agent_regressed:
