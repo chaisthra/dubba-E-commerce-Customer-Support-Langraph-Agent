@@ -220,6 +220,15 @@ PROPOSE_TOOLS = (
     [t for t in _ALL_PROPOSE_TOOLS if t["name"] != "lookup_order"] if AGENT_REGRESSED else _ALL_PROPOSE_TOOLS
 )
 
+# TEMPORARY diagnostic -- 2026-09-02, tracking down why a real CI run with
+# AGENT_REGRESSED=true still showed lookup_order succeeding in trajectory
+# results. Remove once root-caused (see log/loophole.md if not yet resolved).
+print(
+    f"[REGRESSION CHECK] raw_env={os.environ.get('AGENT_REGRESSED')!r} "
+    f"AGENT_REGRESSED={AGENT_REGRESSED} "
+    f"PROPOSE_TOOLS={[t['name'] for t in PROPOSE_TOOLS]}"
+)
+
 EVALUATE_TOOL = {
     "name": "evaluate",
     "description": "Judge whether the data gathered so far is sufficient to answer the customer.",
@@ -406,6 +415,17 @@ def propose_node(state: TicketState) -> dict:
         )
         tool_call = response.tool_calls[0]
         action = {"action_type": tool_call.name, "category": category, **tool_call.input}
+
+        # TEMPORARY diagnostic -- 2026-09-02, same regression-check as above.
+        # Tests specifically whether a provider proposed a tool name that was
+        # never in PROPOSE_TOOLS at all (a hallucinated/out-of-list call, not
+        # just disobeying a forced tool_choice among offered tools).
+        offered_names = [t["name"] for t in PROPOSE_TOOLS]
+        print(
+            f"[REGRESSION CHECK] provider={response.provider} model={response.model} "
+            f"proposed_tool={tool_call.name!r} was_offered={tool_call.name in offered_names} "
+            f"offered={offered_names}"
+        )
 
         valid, reason = schema.validate_action(action)
         if not valid:
